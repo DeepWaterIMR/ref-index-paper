@@ -1,6 +1,6 @@
 # Demersal distribution and fisheries independent trends of beaked and golden redfish in the Barents and Norwegian Seas
 
-Code repository for Vihtakari et al. (2026): Demersal distribution and fisheries‑independent trends of beaked and golden redfish in the Barents and Norwegian Seas. ICES Journal of Marine Science. https://doi.org/10.1093/icesjms/fsac127
+Code repository for Vihtakari et al. (2026): Demersal distribution and fisheries‑independent trends of beaked and golden redfish in the Barents and Norwegian Seas. ICES Journal of Marine Science. [https://doi.org/10.1093/icesjms/fsac127](https://doi.org/10.1093/icesjms/fsag009)
 
 Code used to calculate compiled survey indices for beaked and golden redfish in the Norwegian and Barents Seas, as presented in the paper, will be uploaded here once data sharing and licencing has been sorted out. 
 
