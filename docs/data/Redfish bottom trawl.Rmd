@@ -1,0 +1,500 @@
+---
+title: "Redfish registrations in IMR bottom trawl survey data"
+subtitle: "An internal work document"
+author: |
+  Institute of Marine Research, Norway
+  (contact: Mikko Vihtakari <mikko.vihtakari@hi.no>)
+date: "Version: `r format(Sys.time(), '%d %B, %Y')`"
+output:
+  bookdown::html_document2:
+    toc: true
+    theme: lumen
+    toc_float: true
+    toc_depth: 5
+    collapsed: false
+    variant: markdown+simple_table
+    fig_caption: true
+    number_sections: true
+    code_folding: hide
+header-includes:
+ \usepackage{float}
+ \floatplacement{figure}{H}
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  fig.pos = "H",
+  fig.width = 9,
+  fig.height = 4,
+  tab.pos = "H",
+  collapse = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  comment = "#>"
+)
+
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+
+options(knitr.kable.NA = "")
+```
+
+# Introduction
+
+This document contains an overview of redfish registrations from bottom trawl surveys stored in the IMR database. The document also contains Russian survey data. Those data are confidential and should not be redistributed.
+
+# Material and methods
+
+The data were obtained as follows:
+
+```{r stn-data}
+source("R/legacy/run_first_bes.R")
+
+######## ##
+# Data ----
+
+updated <- as.Date(meta$timestart)
+
+## All data
+
+x <- stnall %>%
+  filter(commonname %in% c("vanlig uer", "snabeluer", "uerslekten")) %>%
+  collect() %>%
+  filter(
+    startyear > 1980,
+    startyear < lubridate::year(Sys.Date()), # filters out the current year by default
+    !is.na(catchweight),
+    gearcategory %in% c("Bottom trawls"),
+    missiontypename %in% c("Forskningsfartøy", "Leiefartøy"),
+    gearcondition %in% 1:2,
+    latitudestart > 0,
+    !gear %in% c(3001, 3101, 3134, 3120), # Remove 3 3001 GOV-trål P, 28 3101 Bunntrål, 1 3134 Singeltrål, , 25 3120 GOV-trål uspes.
+    !stationtype %in% c("C", "2", "A", "E"),
+    !is.na(distance),
+    !nation %in% c("140", "90"), # Remove Russian data
+    distance <= 5,
+    distance >= 0.3
+  ) %>%
+  filter(
+    if_else(
+      cruiseseriescode == "23",
+      samplequality %in% 1:2, # add targetted seithe surveys which used acoustics to select stations, but not on redfish
+      samplequality %in% 1
+    )
+  )
+
+### Rename cruise series
+
+x <- x %>%
+  mutate(
+    cruiseseriescode = case_when(
+      cruise %in%
+        c(
+          1993010,
+          1994110,
+          1995111,
+          1996111,
+          1997112,
+          1998841,
+          1999807,
+          2000811,
+          2001832,
+          2002710
+        ) ~ "23",
+      .default = as.character(cruiseseriescode)
+    )
+  ) %>%
+  mutate(
+    cruiseseries = recode(
+      cruiseseriescode,
+      `2` = "BSS",
+      `3` = "BSS",
+      `2,4` = "BSS",
+      `4` = "BSS",
+      `5` = "WinterS",
+      `6` = "EcoS",
+      `7` = "Other",
+      `8` = "Other",
+      `9` = "Other",
+      `10` = "Other",
+      `11` = "Other",
+      `15` = "ShrimpS",
+      `16` = "EggaN",
+      `23` = "CoastalS",
+      `24` = "Other",
+      `24,8` = "Other",
+      `25` = "EggaS",
+      `26` = "Other",
+      `31` = "BSS",
+      `NA` = "Other",
+      "JuvenileS" = "BSS",
+      "RussianStuff" = "BSS",
+      "SvalbardS" = "BSS",
+      "BSshrimpS" = "BSS",
+      "TrawlMay" = "EggaMay"
+    ),
+    geartype = if_else(
+      grepl("^32", gear),
+      "Shrimp",
+      if_else(grepl("^31", gear), "Cod", "Other")
+    )
+  ) %>%
+  mutate(
+    stationstartdate = strptime(
+      stationstartdate,
+      format = "%Y-%m-%d %H:%M:%S",
+      tz = "GMT"
+    ),
+    stationstopdate = strptime(
+      stationstopdate,
+      format = "%Y-%m-%d %H:%M:%S",
+      tz = "GMT"
+    ),
+    duration = difftime(stationstopdate, stationstartdate, units = 'mins')
+  )
+
+x <- x[, which(unlist(lapply(x, function(x) !all(is.na(x))))), with = FALSE] # Remove empty columns
+
+# Save
+
+if (TRUE) {
+  tmp <- x %>%
+    group_by(
+      startyear,
+      cruiseseries,
+      cruise,
+      callsignal,
+      platformname,
+      missionid,
+      serialnumber
+    ) %>%
+    reframe(
+      catchcount = sum(catchcount, na.rm = TRUE),
+      catchweight = sum(catchweight, na.rm = TRUE)
+    ) %>%
+    group_by(
+      startyear,
+      cruiseseries,
+      cruise,
+      callsignal,
+      platformname,
+      missionid
+    ) %>%
+    reframe(
+      n = n(),
+      catchcount = sum(catchcount),
+      catchweight = sum(catchweight)
+    )
+
+  tmp %>%
+    left_join(
+      mission %>%
+        filter(missionid %in% local(tmp$missionid)) %>%
+        collect() %>%
+        dplyr::select(missionid, purpose),
+      by = join_by(missionid)
+    ) %>%
+    write_csv(
+      file = file.path(
+        "data/survey data",
+        paste0(updated, " redfish bottom trawl cruises.csv")
+      )
+    )
+
+  saveRDS(
+    x,
+    file = file.path(
+      "data/survey data",
+      paste0(updated, " redfish bottom trawl data without absences.rds")
+    ),
+    compress = "xz"
+  )
+}
+```
+
+The dataset was downloaded on `r updated`. 
+
+# Results
+
+```{r include = FALSE}
+tmp <- x %>%
+  distinct(
+    commonname,
+    cruiseseries,
+    cruise,
+    startyear,
+    stationstartdate,
+    serialnumber,
+    platformname,
+    callsignal,
+    geartype,
+    longitudestart,
+    latitudestart
+  ) %>%
+  group_by(commonname) %>%
+  count()
+```
+
+
+The dataset contained `r tmp %>% filter(commonname == "snabeluer") %>% pull(n)` stations with beaked redfish ("snabeluer"), `r tmp %>% filter(commonname == "vanlig uer") %>% pull(n)` stations with golden redfish ("vanlig uer") and `r tmp %>% filter(commonname == "uerslekten") %>% pull(n)` stations with "uerslekten". There were a total of `r x %>% distinct(cruiseseriescode, startyear, cruise, platformname, serialnumber) %>% nrow()` bottom trawl hauls containing these redfish records in the IMR database from `r min(x$startyear)` to `r max(x$startyear)`. 24 stations with "uerfamilien" were removed from the dataset. There were little data before 1981 and hence the time-series was started from 1981. Sporadic bottom trawl types were removed from the dataset: 3 of 3001 GOV-trål P, 28 of 3101 Bunntrål, 25 of 3120 GOV-trål uspes., and 1 of 3134 Singeltrål. In total `r length(unique(x$cruiseseriescode))-1` arbitrary survey time-series were found to contain redfish records. These time-series were named as shown in Table \@ref(tab:cs-names).
+
+```{r cs-names}
+x %>%
+  distinct(cruiseseries, cruiseseriescode) %>%
+  left_join(
+    csindex %>%
+      distinct(cruiseseriescode, name) %>%
+      collect() %>%
+      mutate(cruiseseriescode = as.character(cruiseseriescode))
+  ) %>%
+  arrange(cruiseseries, cruiseseriescode) %>%
+  kableExtra::kbl(
+    caption = "Names and codes of cruise time-series with reedfish",
+    format.args = list(big.mark = ""),
+    row.names = FALSE
+  ) %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "condensed"))
+```
+
+```{r, fig.cap = "Number of redfish occurrences and total catch over all years in the survey time-series data"}
+tmp <- x %>%
+  group_by(commonname, startyear, cruiseseries, platformname, serialnumber) %>%
+  reframe(value = sum(catchweight, na.rm = TRUE) / 1e3) %>%
+  group_by(startyear, commonname, cruiseseries) %>%
+  reframe(value = sum(value), n = n())
+
+tmp %>%
+  group_by(commonname, cruiseseries) %>%
+  reframe(catch = sum(value), n = sum(n)) %>%
+  arrange(-n) %>%
+  mutate(cruiseseries = factor(cruiseseries, unique(cruiseseries))) %>%
+  pivot_longer(cols = c(catch, n)) %>%
+  mutate(
+    name = recode(
+      name,
+      "catch" = "Total catch (tons)",
+      "n" = "Number of occurrences"
+    )
+  ) %>%
+  ggplot(aes(x = cruiseseries, y = value, fill = commonname)) +
+  geom_col() +
+  labs(x = "Survey", y = "Value") +
+  scale_y_continuous(expand = expansion(c(0, 0.01))) +
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  facet_wrap(~name, scales = "free_y") +
+  theme(legend.position = "bottom")
+```
+
+```{r, fig.height=7, fig.cap = "Total catch (A) and number of occurrences (B) allocated to year."}
+survey_cols <- unique(x$cruiseseries)[unique(x$cruiseseries) != "NA"]
+survey_cols <- setNames(
+  colorRampPalette(c(
+    '#9e0142',
+    '#d53e4f',
+    '#f46d43',
+    '#fdae61',
+    '#fee08b',
+    '#ffffbf',
+    '#e6f598',
+    '#abdda4',
+    '#66c2a5',
+    '#3288bd',
+    '#5e4fa2'
+  ))(length(survey_cols)),
+  survey_cols
+)
+survey_cols <- c(survey_cols, "NA" = "grey")
+
+p1 <- ggplot(tmp, aes(x = startyear, y = value, fill = cruiseseries)) +
+  geom_col() +
+  labs(x = "Year", y = "Total catch (t)", fill = "Survey") +
+  scale_x_continuous(breaks = seq(1900, 2030, 5)) +
+  facet_wrap(~commonname, scales = "free_y") +
+  # scale_y_log10(labels = scales::label_log()) +
+  coord_cartesian(expand = FALSE) +
+  scale_fill_manual(values = survey_cols) +
+  theme(legend.position = "none")
+
+
+p2 <- ggplot(tmp, aes(x = startyear, y = n, fill = cruiseseries)) +
+  geom_col() +
+  labs(x = "Year", y = "Number of occurrences", fill = "Survey") +
+  scale_x_continuous(breaks = seq(1900, 2030, 5)) +
+  coord_cartesian(expand = FALSE) +
+  facet_wrap(~commonname, scales = "free_y") +
+  scale_fill_manual(values = survey_cols) +
+  guides(fill = guide_legend(nrow = 2, byrow = TRUE)) +
+  theme(legend.position = "bottom")
+
+# p3 <- x %>%
+#   group_by(startyear, platformname, serialnumber, longitudestart, latitudestart, cruiseseries) %>%
+#   count() %>%
+#   qmap(color = cruiseseries, shape = I(21), alpha = I(0.7)) +
+#   theme(legend.position = "none",
+#         axis.title = element_blank(),
+#         axis.text = element_blank())
+# leg <- cowplot::get_legend(p1)
+
+cowplot::plot_grid(p1, p2, labels = "AUTO", ncol = 1, rel_heights = c(4, 6))
+```
+
+```{r, fig.height=6, fig.cap = "Geographic positions of redfish occurrences in the bottom trawl survey time-series"}
+qmap(x, shape = I(1), size = I(0.5), alpha = I(0.7)) +
+  facet_grid(commonname ~ cruiseseries)
+```
+
+```{r, fig.height=8, fig.cap = "Overview of used bottom trawls. A) reketrål means Campelen-like shrimp trawls and other names Alfredo-like cod trawls. Number in parenthesis after the name indicates number of occurrences. B) Alfredo and Campelen-like trawls over time."}
+
+tmp <- x %>%
+  group_by(
+    startyear,
+    platformname,
+    serialnumber,
+    longitudestart,
+    latitudestart,
+    cruiseseries,
+    gearname,
+    gear,
+    geartype
+  ) %>%
+  reframe(value = sum(catchweight, na.rm = TRUE))
+
+tmp <- tmp %>%
+  left_join(
+    tmp %>%
+      group_by(gearname) %>%
+      count()
+  ) %>%
+  mutate(gearname = paste0(gearname, " (", n, ")")) %>%
+  arrange(-n) %>%
+  mutate(gearname = factor(gearname, unique(gearname)))
+
+cowplot::plot_grid(
+  ggplot(tmp, aes(x = gearname, y = value, color = cruiseseries)) +
+    geom_boxplot() +
+    theme_bw() +
+    facet_wrap(~geartype, scales = "free_x") +
+    scale_y_log10(labels = scales::label_log(), n.breaks = 8) +
+    scale_color_manual(values = survey_cols) +
+    labs(x = "Gear name", y = "Catch (kg)", color = "Survey") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)),
+
+  ggplot(
+    tmp %>%
+      filter(cruiseseries != "NA") %>%
+      group_by(startyear, geartype) %>%
+      count(),
+    aes(x = startyear, y = n, fill = geartype)
+  ) +
+    geom_col() +
+    theme_bw() +
+    scale_x_continuous(breaks = seq(1900, 2030, 5), expand = c(0, 0)) +
+    scale_y_continuous(expand = expansion(c(0, 0.05))) +
+    labs(y = "Number of trawl hauls", x = "Year", fill = "Gear type"),
+  labels = "AUTO",
+  ncol = 1,
+  rel_heights = c(6, 4)
+)
+```
+
+```{r, fig.cap = "Overview of survey timing. Cruises have been separated.", fig.height=10}
+#| fig-height: 10
+#| label: fig-survey-time
+#| fig-cap: "Overview of survey timing."
+
+tmp <- x %>%
+  filter(!is.na(stationstartdate)) %>%
+  mutate(
+    yday = as.Date(lubridate::yday(stationstartdate) - 1, origin = "2023-01-01")
+  ) %>%
+  group_by(startyear, cruise, cruiseseries) %>%
+  reframe(min = min(yday), max = max(yday)) %>%
+  mutate(
+    cruiseseries = factor(cruiseseries, unique(.$cruiseseries)),
+    ypos = startyear +
+      as.numeric(cruiseseries) / (nlevels(cruiseseries) * 3)
+  )
+
+tmp %>%
+  ggplot(aes(
+    x = min,
+    xend = max,
+    y = ypos,
+    yend = ypos,
+    color = cruiseseries,
+    group = cruise
+  )) +
+  geom_segment(linewidth = 2, alpha = 0.7) +
+  scale_x_date(
+    "Month",
+    date_labels = "%b",
+    date_breaks = "1 months",
+    expand = expansion(c(0.03, 0.01))
+  ) +
+  scale_y_continuous(
+    "Year",
+    breaks = seq(1970, 2030, 1),
+    expand = expansion(c(0.01, 0.01))
+  ) +
+  # coord_cartesian(ylim = c(1980, round_any(max(tmp$ypos), 1, ceiling))) +
+  scale_color_manual("Survey", values = survey_cols) +
+  theme_bw() +
+  theme(
+    panel.grid.minor.y = element_blank()
+  )
+```
+
+```{r}
+colfun <- function(x) {
+  mn <- mean(x, na.rm = TRUE)
+  ifelse(
+    is.na(mn),
+    "",
+    paste(
+      round(mn, 1),
+      "\u00B1",
+      paste(round(range(x, na.rm = TRUE), 1), collapse = "-")
+    )
+  )
+}
+
+x %>%
+  group_by(cruiseseries, geartype, gearname) %>%
+  mutate(
+    verticaltrawlopening = ifelse(
+      verticaltrawlopening < 0,
+      NA,
+      verticaltrawlopening
+    )
+  ) %>%
+  summarise(
+    n = n(),
+    `Bottom depth (m)` = colfun(bottomdepthstart),
+    `Tow distance (nmi)` = colfun(distance),
+    `Tow duration (min)` = colfun(duration),
+    `Trawling speed (kn)` = colfun(vesselspeed)
+  ) %>%
+  rename(
+    "Survey" = "cruiseseries",
+    "Gear type" = "geartype",
+    "Gear name" = "gearname"
+  ) %>%
+  knitr::kable(
+    caption = "Trawls used in the survey time-series.",
+    format.args = list(big.mark = ""),
+    digits = 1,
+    row.names = FALSE
+  ) %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "condensed"))
+```
+
+# Appendix: run first script
+
+Following script was used to access the BioticExplorerServer database:
+
+```{r, code = readLines("R/legacy/run_first_bes.R"), eval = FALSE, echo = TRUE}
+```
+
+

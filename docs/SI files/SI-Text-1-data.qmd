@@ -1,0 +1,2686 @@
+---
+title: "SI Text 1: Data"
+date: today
+published-title: "Version"
+bibliography: "../manuscript/zotero_library.bib"
+csl: "../manuscript/ices_jms.csl"
+format:
+  html:
+    self-contained: true
+    fig-width: 9
+    fig-height: 6
+    toc: true
+    code-fold: true
+    mermaid:
+      theme: neutral
+  # pdf:
+  #   fig-width: 6.69
+  #   fig-height: 5
+  #   fig-dpi: 96
+  #   fig-format: png
+execute:
+  message: false
+  warning: false
+  cache: false
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, eval = TRUE, include = FALSE, cache = FALSE}
+
+knitr::opts_knit$set(root.dir = '../../')
+
+knitr::knit_hooks$set(
+  timeit = local({
+    now <- NULL
+    function(before, options) {
+      if (before) {
+        now <<- Sys.time()
+      } else {
+        res <- round(difftime(Sys.time(), now, units = "mins"), 1)
+        now <<- NULL
+        # use options$label if you want the chunk label as well
+        print(paste('Time:', as.character(res), "min"))
+      }
+    }
+  })
+)
+```
+
+This is a supplementary information file for @vihtakari2026 providing reproducible documentation on data used for the calculation of the survey indices using generalized linear mixed effects models fitted with the [sdmTMB package](https://CRAN.R-project.org/package=sdmTMB) [@sdmTMB] for R [@rcoreteam]. HTML version of this document contains foldable code fields showing the R code used to compile the data. Further documents showing the practical data extraction from the Institute of Marine Research (IMR) databases are available on [GitHub](https://github.com/DeepWaterIMR/ref-index-paper), but the data extraction only works within the institute's intranet. The scripts use the [tidyverse](https://www.tidyverse.org/) [@tidyverse] notation for data manipulation. The dplyr [@dplyr] package is especially utilized. 
+
+Data can be loaded using the following script:
+
+```{r data, cache=FALSE}
+# Clear the workspace for manual code runs
+
+rm(list = ls())
+
+# Settings
+
+update_data <- FALSE # TRUE runs time consuming scripts,
+# FALSE loads the results from objects
+map_ncol <- 8
+
+############## ####
+#### Libraries ----
+
+## Package names
+packages <- c(
+  "tidyverse",
+  "sf",
+  "ggOceanMaps",
+  "ggspatial",
+  "scales",
+  "concaveman",
+  "units",
+  "lubridate",
+  "plotly",
+  "Hmisc"
+)
+
+## Install packages not yet installed
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed_packages])
+}
+
+## Load packages
+invisible(lapply(packages, library, character.only = TRUE))
+
+################### ###
+# Custom functions ----
+
+source("R/legacy/make_table.R") # a function to make tables
+source("R/legacy/bubble_map.R")
+
+## Gear list
+gearList <- read_rds('data/definitions/imr_gearlist.rds')
+
+################ ##
+# ggplot theme ----
+
+theme_cust <- theme_classic(base_size = 10) %+replace%
+  theme(
+    strip.background = element_blank(),
+    panel.background = element_blank(),
+    plot.background = element_blank(),
+    legend.background = element_blank(),
+    legend.box.background = element_blank(),
+    plot.margin = margin(5.5, 10, 5.5, 5.5)
+  )
+
+theme_set(theme_cust) # Set default theme globally for the entire project
+
+####################
+# Read the data ----
+
+# load("data/in/Ghl strata polygons.rda")
+
+load("data/survey data/Compiled_redfish_survey_data.rda")
+value_name <- expression(paste("Density (kg ", nmi^-2, ")"))
+
+filter_sp <- c("snabeluer", "vanlig uer")
+sp_name <- "redfish"
+Sp_name <- "Redfish"
+```
+
+# Data collation
+
+This section is mostly meant as an internal reference for IMR researchers. Readers not interested in how the data are organized in the institute's databases may skip to the next section. 
+
+The dataset was collated from multiple sources including the Institute of Marine Research (IMR) Biotic database, which, at the time of writing, was available through API when connected to the institute's intranet. This database contains trawl catches on two levels: station and individual fish length measurements. The database was accessed and filtered using the [BioticExplorerServer](https://github.com/MikkoVihtakari/BioticExplorerServer) package for R [@BioticExplorer]. Additional historical SPD files that have not yet been added to the Biotic database were added to the dataset using a custom script written by Vollen, Hallfredsson & Vihtakari (2024). The scripts are available from the first author upon request. 
+
+## Station-level data
+
+The obtained station-level data were filtered for cruises (single surveys or trips) that recorded at least one bottom trawl haul with beaked redfish (called "snabeluer" in the database), golden redfish ("vanlig uer", sometimes "uer" in old SPD files) or undetermined redfish (“uerslekten”, “uerfamilie”, “uerfamilien” or “uerfam”) leading to a dataset with absences. The data were further filtered using internal tags shown in @lst-stn-filter leading to a cleaned bottom trawl survey dataset, which is called "stn" in the following R scripts. Records in the dataset were further cleaned using a custom script which is available from the first author on request, but may not be interesting for a wider audience. 
+
+```{#lst-stn-filter .r lst-cap="Code used to filter station-based data"}
+filter(
+startyear > 1980,
+!is.na(catchweight),
+gearcategory %in% c("Bottom trawls"), 
+missiontypename %in% c("Forskningsfartøy", "Leiefartøy"),
+gearcondition %in% 1:2,
+samplequality %in% 1,
+latitudestart > 0,
+!stationtype %in% c("C", "2", "A", "E"),
+!is.na(distance),
+!gear %in% c(3001, 3101, 3134, 3120, 3136), 
+distance <= 5,
+distance >= 0.3
+) %>% 
+filter(!(cruiseseries == "EggaN" & startyear < 1997))
+```
+
+Catch weight in this dataset has been commonly estimated by weighting the entire catch by species or by subsampling (weighting the entire catch and weighting a randomly-selected representative sample of each species). Hence, catch weight can be assumed as the most reliable quantity-measure in the trawl dataset, whose quality varies considerably with less thorough catch recording during the earlier years (before 2000 or so). Catch count, on the other hand, has often been estimated from catch weight and a subsample of weight measured fish. An exception being when only few fish were caught. In those cases, the fish may have actually been counted. Consequently, catch count is less precise measure of a trawl catch in the dataset than catch weight, and we have used weight in the preceding analyses whenever feasible. Catch weights and counts were turned to swept area biomass and abundance densities (`rho_biomass` and `rho_abundance`, respectively) by dividing with distance times 25 m as the trawl width (@lst-stn-response-calculus). See the Material and methods in the main text for further details about this operation. 
+
+```{#lst-stn-response-calculus .r lst-cap="Code used to calculate the response variables in station-based data"}
+stn %>% 
+group_by(
+startyear, cruise, callsignal, platformname, missionid, stationstartdate,
+stationstopdate, bottomdepthstart, gear, gearname, trawldoorspread, 
+verticaltrawlopening, wirelength, vesselspeed, serialnumber, 
+longitudestart, latitudestart, distance, commonname
+) %>%
+reframe(biomass = sum(catchweight, na.rm = TRUE),
+count = sum(catchcount, na.rm = TRUE)) %>%
+mutate(commonname = factor(commonname)) %>% 
+group_by(startyear, cruise, callsignal, platformname, missionid, 
+stationstartdate, stationstopdate, bottomdepthstart, gear, gearname, 
+trawldoorspread, verticaltrawlopening, wirelength, vesselspeed,
+serialnumber, longitudestart, latitudestart, distance) %>% 
+complete(
+commonname, fill = list(biomass = 0, count = 0), explicit = FALSE
+) %>% 
+mutate(
+gear_width = 25,
+rho_biomass = biomass/(distance*(gear_width/1852)),
+rho_abundance = count/(distance*(gear_width/1852))
+)
+```
+
+## Individual-level data
+
+Next, individual-level data was filtered for redfish ("snabeluer", "vanlig uer", "uerslekten", "uerfamilien") and for stations recording these species in the station-level dataset. The resulting dataset, called "ind" in the following scripts, was then combined with the station-level dataset to obtain meta-data such as station positions. The dataset was further manipulated as specified in @lst-ind-manipulation: number of length-measured fish per trawl station was counted and the estimated total number of fish within the trawl haul divided by the number of length-measured fish to obtain the number of superindividuals representing a length. The superindividuals were used in the next step when imputing station-level catches to lengths. 
+
+```{#lst-ind-manipulation .r lst-cap="Code used to manipulate individual-based data"}
+ind <- ind %>%
+group_by(cruiseseries, startyear, cruise, callsignal, serialnumber,
+catchsampleid, commonname) %>% 
+mutate(lengthsamplecount = n()) %>% 
+ungroup() %>% 
+mutate(repN = catchcount/lengthsamplecount,
+repN = ifelse(is.na(repN), lengthsamplecount, repN)) %>%
+rename("superindividuals" = "repN") %>%
+dplyr::select(
+cruiseseries, startyear, cruise, platformname, callsignal, serialnumber, 
+commonname, catchpartnumber, specimenid, superindividuals, sex, 
+maturationstage, catchweight, catchcount, individualweight, length, age) %>%
+mutate(length = round(100*length + 1e-6, 0)) 
+```
+
+Some historical spd files contained length-distribution data instead of individual-level data (i.e. data where each 1 cm length group had a count instead of a table with length measurements). These data were expanded to the same format than individual-level data by repeating each length by counted times using the `dplyr::uncount()` function. 
+
+## Length-based data combining station- and individual-levels
+
+Finally, the station-level catches were imputed to lengths leading to a length-based dataset (called "stn_ldist") following a process with multiple steps. First, length-weight relationships were calculated for each species using the [ggFishPlots](https://CRAN.R-project.org/package=ggFishPlots) package [@ggFishPlots] (@lst-length-weight). The nonlinear equation $weight = a \times length^b$ was fitted using nonlinear least squares (nls function in R) improving the fit to large individuals over the standard logarithmic linear regression method. Observations yielding absolute residual values from initial logarithmic regression, $log(weight) = a + b \times log(length)$, exceeding the 99.5 percentile were considered outliers and removed from the nonlinear models. These values had little influence on the coefficients, however.
+
+```{#lst-length-weight .r lst-cap="Code used to calculate length-weight relationships for each species."}
+tmp <- lapply(levels(ind$commonname), function(k) {
+ggFishPlots::plot_lw(
+ind %>% filter(commonname == k), 
+weight = "individualweight", 
+use.nls = TRUE,
+outlier.percentile = 99.5,
+annotate.coefficients = TRUE
+)
+}) %>% setNames(levels(ind$commonname))
+
+lw_coefficients <- 
+lapply(seq_along(tmp), function(i) {
+tmp[[i]]$param %>% mutate(species = names(tmp[i]), .before = 1)}) %>% 
+bind_rows()
+```
+
+These length-weight relationships were, then, used to calculate weight for fish with a missing weight in the individual-level dataset (@lst-dt-imputation). The weight and the number of superindividuals each length-measurement contained was used to allocate the response variables, catch weight (`weight`) and count (`n`) as well as biomass (`rho_biomass`) and abundance (`rho_abundance`) densities, from each trawl catch to 5 cm increment length groups such that the sum of these response variable was for each trawl haul equal to that in the station-level data. 
+
+```{#lst-dt-imputation .r lst-cap="Code used to combine station- and individual-level datasets into a length-resolved dataset."}
+stn_ldist <- ind %>%
+left_join(
+lw_coefficients %>% 
+dplyr::select(species, term, estimate) %>% 
+pivot_wider(names_from = term, values_from = estimate) %>% 
+rename("commonname" = "species"),
+by = join_by(commonname)
+) %>% 
+mutate(weight = a*length^b) %>% 
+dplyr::select(-a, -b) %>% 
+full_join(
+stn, 
+by = join_by(cruiseseries, startyear, cruise, platformname, callsignal, 
+serialnumber, commonname)
+) %>%
+mutate(
+length_group = cut(length, seq(0, 95, by = 5))) %>%
+replace_na(list(superindividuals = 1)) %>%
+mutate(commonname = factor(commonname, levels = levels(stn$commonname)))
+
+stn_ldist <-
+stn_ldist %>%
+group_split(commonname) %>%
+map(~ {
+.x %>% 
+mutate(weight = ifelse(is.na(individualweight), weight, individualweight)) %>%
+group_by(cruiseseries, startyear, cruise, platformname, callsignal,
+serialnumber, stationstartdate, longitudestart, latitudestart,
+bottomdepthstart, gear, gearname, geartype, distance, gear_width,
+commonname, length_group, count, biomass, rho_abundance,
+rho_biomass) %>%
+reframe(n = sum(superindividuals), weight = n*mean(weight)) %>%
+mutate(n = ifelse(is.na(length_group), 0, n)) %>%
+filter(!(is.na(length_group) & rho_biomass > 0)) %>% 
+group_by(cruiseseries, startyear, cruise, platformname, callsignal,
+serialnumber, stationstartdate, longitudestart, latitudestart,
+bottomdepthstart, gear, gearname, geartype, distance,
+gear_width, commonname) %>%
+mutate(total_n = sum(n),
+total_w = sum(weight)) %>%
+ungroup() %>%
+mutate(weight = weight / (total_w/biomass)) %>%
+mutate(
+rho_biomass = ifelse(biomass == 0, 0, rho_biomass*(weight/biomass)),
+rho_abundance = ifelse(n == 0, 0, rho_abundance*(n/total_n))
+) %>%
+mutate(n = n / (total_n/count)) %>%
+dplyr::select(-total_n,-total_w) %>%
+rename(total_weight = biomass, total_n = count) %>%
+group_by(cruiseseries, startyear, cruise, platformname, callsignal,
+serialnumber, stationstartdate, longitudestart, latitudestart,
+bottomdepthstart, gear, gearname, geartype, distance,
+gear_width, commonname) %>%
+complete(length_group,
+fill = list(n = 0, weight = 0,
+rho_abundance = 0, rho_biomass = 0),
+explicit = FALSE
+) %>%
+mutate(total_n = sum(n), total_weight = sum(weight)) %>% 
+replace_na(list(total_n = 0, total_weight = 0)) %>%
+relocate(rho_abundance, rho_biomass, .after = last_col()) %>% 
+filter(!is.na(length_group)) 
+}) %>% 
+bind_rows() 
+```
+
+Redfish was not length measured during all surveys (cruises). Including such surveys into the length-based dataset would have introduced a negative bias where stations without redfish could be included, but stations with redfish excluded due to the missing length measurements would dissapear instead of being considered as positive stations. Consequently, we removed any cruises that contained more than 10% of stations missing length-measurements by each species. The 10% threshold was found iteratively, and the resulting station totals in the length-based dataset are summarized later in @fig-n-stn-lb. 
+
+# Station level data
+
+```{r, echo = FALSE}
+if (exists("dt")) {
+  stn_ldist <- dt
+}
+```
+
+Station-level data was used to compile the main models and survey indices in the manuscript. First, the dataset was filtered for surveys were each species, beaked ("snabeluer") and golden ("vanlig uer") redfish, was consistently recorded. We used swept area biomass density as a response variable in consequent analyses involving station-level data. 
+
+```{r}
+stn <- lapply(c("snabeluer", "vanlig uer"), function(filter_sp) {
+  out <- stn %>%
+    distinct() %>%
+    filter(commonname %in% filter_sp) %>%
+    mutate(gear = if_else(gear == 3178, 3181, gear)) %>%
+    mutate(gear_width = 25) %>%
+    mutate(
+      cruiseseries = factor(cruiseseries),
+      id = paste(
+        cruiseseries,
+        startyear,
+        platformname,
+        serialnumber,
+        sep = "-"
+      ),
+      swept_area = (gear_width / 1852) * distance
+    ) %>%
+    mutate(
+      yday = lubridate::yday(stationstartdate),
+      .before = stationstopdate
+    ) %>%
+    mutate(month = as.integer(month)) %>%
+    droplevels() %>%
+    mutate(
+      rho_biomass = biomass / swept_area,
+      rho_abundance = count / swept_area,
+      value = rho_biomass
+    ) %>% # this defines the response type
+    filter(!is.na(value))
+
+  tmp <- out %>%
+    group_by(cruiseseries, cruise, startyear, platformname) %>%
+    reframe(sum = sum(value)) %>%
+    filter(sum == 0) %>%
+    mutate(tmpid = paste(cruise, startyear, platformname))
+
+  out %>%
+    mutate(tmpid = paste(cruise, startyear, platformname)) %>%
+    filter(!tmpid %in% tmp$tmpid) %>%
+    dplyr::select(-tmpid)
+}) %>%
+  bind_rows()
+```
+
+The station-level dataset for beaked and golden redfish, respectively, contained `r stn %>% filter(commonname == "snabeluer") %>% distinct(startyear, platformname, serialnumber) %>% nrow()` and `r stn %>% filter(commonname == "vanlig uer") %>% distinct(startyear, platformname, serialnumber) %>% nrow()` bottom trawl hauls collected over `r stn %>% distinct(startyear) %>% nrow()` years, from `r min(stn$startyear)` to `r max(stn$startyear)`, during `r stn %>% filter(commonname == "snabeluer") %>% distinct(startyear, cruise, platformname) %>% nrow()` and `r stn %>% filter(commonname == "vanlig uer") %>%  distinct(startyear, cruise, platformname) %>% nrow()` surveys. Evaluated from weight information, `r stn %>% filter(commonname == "snabeluer", rho_biomass > 0, !is.na(rho_biomass)) %>% distinct(startyear, platformname, serialnumber) %>% nrow()` of these stations contained beaked redfish and `r stn %>% filter(commonname == "vanlig uer", rho_biomass > 0, !is.na(rho_biomass)) %>% distinct(startyear, platformname, serialnumber) %>% nrow()` golden redfish. `r stn %>% filter(commonname == "snabeluer", rho_biomass == 0, !is.na(rho_biomass)) %>% distinct(startyear, platformname, serialnumber) %>% nrow()` and `r stn %>% filter(commonname == "vanlig uer", rho_biomass == 0, !is.na(rho_biomass)) %>% distinct(startyear, platformname, serialnumber) %>% nrow()` trawl hauls did not contain beaked redfish and golden redfish, respectively.
+
+`r stn$stationstartdate %>% max` is the latest record in the dataset. Internally, the dataset was divided to survey time-series, a collection of surveys that were approximately standardized within each other. Older survey time-series (BHtokt, BlkvProj, BSS, Other) consist of multiple surveys that may or may not share standardization. Survey time-series information was not used in the spatiotemporal models and hence functions only as an internal reference during data manipulation and checking. 
+
+```{r fig-overview-positions, fig.cap = paste("Overview of station positions over all years. Purple crosses indicate stations with no", sp_name, "occurrences."), fig.height = 10}
+
+cowplot::plot_grid(
+  plotlist = lapply(
+    split(
+      levels(stn$cruiseseries),
+      ceiling(
+        seq_along(levels(stn$cruiseseries)) / (nlevels(stn$cruiseseries) / 2)
+      )
+    ),
+    function(k) {
+      basemap(stn, bathy.style = "rbg", legends = FALSE, base_size = 8) +
+        geom_spatial_point(
+          data = stn %>% filter(rho_biomass == 0, cruiseseries %in% k),
+          aes(x = longitudestart, y = latitudestart),
+          color = "purple",
+          shape = "+",
+          alpha = 0.5
+        ) +
+        geom_spatial_point(
+          data = stn %>%
+            filter(rho_biomass > 0 & !is.na(rho_biomass), cruiseseries %in% k),
+          aes(
+            x = longitudestart,
+            y = latitudestart,
+            size = rho_biomass,
+            color = geartype
+          ),
+          shape = 21
+        ) +
+        facet_grid(commonname ~ cruiseseries) +
+        scale_size_area() +
+        labs(
+          color = "Gear type",
+          size = expression(paste("Biomass density (kg ", nmi^-2, ")"))
+        ) +
+        theme(legend.position = "bottom", axis.title = element_blank())
+    }
+  ),
+  ncol = 1
+)
+```
+
+```{r fig-dens-overview-grid, fig.cap = "Biomass swept area densities for beaked (A) and golden (B) redfish averaged over all data for a grid covering the study area. Grey dots indicate bottom trawl stations.", fig.height=6}
+
+p <- basemap(stn, base_size = 8)
+
+grid <- st_as_sf(
+  expand.grid(lon = attributes(p)$limits[1:2], lat = attributes(p)$limits[3:4]),
+  coords = c("lon", "lat")
+) %>%
+  st_set_crs(attributes(p)$crs) %>%
+  st_make_grid(n = 50) %>%
+  st_transform(4326) %>%
+  st_as_sf(data.frame(id = 1:length(.)), geometry = .)
+
+x <- stn %>%
+  dplyr::select(-id) %>%
+  st_as_sf(coords = c("longitudestart", "latitudestart"), crs = 4326) %>%
+  st_join(grid[, "id"])
+
+y <- x %>%
+  st_set_geometry(NULL) %>%
+  group_by(id, commonname) %>%
+  reframe(
+    bm = mean(rho_biomass, na.rm = TRUE),
+    ab = mean(rho_abundance, na.rm = TRUE)
+  )
+
+z1 <- grid %>%
+  full_join(y, by = "id") %>%
+  filter(!is.na(bm), commonname == "snabeluer")
+
+z2 <- grid %>%
+  full_join(y, by = "id") %>%
+  filter(!is.na(bm), commonname == "vanlig uer")
+
+p1 <- basemap(data = stn, grid.col = NA) +
+  geom_sf(data = z1, aes(fill = log10(ab + 1)), size = LS(0.1)) +
+  geom_spatial_point(
+    data = stn,
+    aes(x = longitudestart, y = latitudestart),
+    shape = ".",
+    color = "grey40"
+  ) +
+  labs(fill = "Mean biomass\ndensity (log10(rho + 1))\nkg/nmi2") +
+  scale_fill_distiller(palette = "Spectral", na.value = NA) +
+  theme(
+    legend.position = "bottom",
+    axis.text = element_blank(),
+    axis.title = element_blank()
+  )
+
+p2 <- basemap(data = stn, grid.col = NA) +
+  geom_sf(data = z2, aes(fill = log10(bm + 1)), size = LS(0.1)) +
+  geom_spatial_point(
+    data = stn,
+    aes(x = longitudestart, y = latitudestart),
+    shape = ".",
+    color = "grey40"
+  ) +
+  labs(fill = "Mean biomass\ndensity (log10(rho + 1))\nkg/nmi2") +
+  scale_fill_distiller(palette = "Spectral", na.value = NA) +
+  theme(
+    legend.position = "bottom",
+    axis.text = element_blank(),
+    axis.title = element_blank()
+  )
+
+cowplot::plot_grid(reorder_layers(p1), reorder_layers(p2), labels = "AUTO")
+```
+
+```{r fig-dens-overview-bubble, fig.cap = "Biomass swept area densities over years and surveys for beaked (A) and golden (B) redfish", fig.height=6}
+p1 <- stn %>%
+  filter(commonname == "snabeluer") %>%
+  bubble_map(
+    by_year = FALSE,
+    legend_rows = 2,
+    label = expression(paste("Density (n ", nmi^-2, ")"))
+  )
+p2 <- stn %>%
+  filter(commonname == "vanlig uer") %>%
+  filter(!is.na(value)) %>%
+  bubble_map(by_year = FALSE, legend_rows = 2)
+
+cowplot::plot_grid(p1, p2, ncol = 2, labels = "AUTO")
+```
+
+## Numbers
+
+Stations were distributed unevenly among survey time-series and years with Winter survey having the longest and most consistent record starting in 1981.
+
+```{r fig-n-stn-year-cs, fig.cap = paste("Number of stations with and without", sp_name, "by year and survey series.")}
+stn %>%
+  group_by(cruiseseries, startyear, commonname) %>%
+  reframe(
+    yes = sum(rho_biomass > 0, na.rm = TRUE),
+    no = sum(rho_biomass == 0, na.rm = TRUE)
+  ) %>%
+  pivot_longer(cols = c(yes, no)) %>%
+  mutate(name = factor(name, c("no", "yes"))) %>%
+  ggplot(aes(x = startyear, y = value, fill = name)) +
+  geom_col() +
+  labs(x = "Year", y = "Number of stations", fill = "Contains\ntarget taxa") +
+  facet_grid(commonname ~ cruiseseries) +
+  scale_fill_manual(values = c("yes" = "#66a182", "no" = "grey")) +
+  scale_y_continuous(expand = c(0.01, 0)) +
+  scale_x_continuous(
+    breaks = seq(1980, 2030, 5),
+    labels = substr(seq(1980, 2030, 5), 3, 4),
+    expand = c(0.01, 0)
+  ) +
+  theme(legend.position = "bottom")
+```
+
+```{r fig-n-stn-cs, fig.cap = paste("Average number of stations per year with and without", sp_name, "by survey series.")}
+stn %>%
+  group_by(cruiseseries, startyear, commonname) %>%
+  reframe(
+    yes = sum(rho_biomass > 0, na.rm = TRUE),
+    no = sum(rho_biomass == 0, na.rm = TRUE)
+  ) %>%
+  group_by(cruiseseries, commonname) %>%
+  reframe(yes = mean(yes, na.rm = TRUE), no = mean(no, na.rm = TRUE)) %>%
+  pivot_longer(cols = c(yes, no)) %>%
+  mutate(name = factor(name, c("no", "yes"))) %>%
+  ggplot(aes(x = cruiseseries, y = value, fill = name)) +
+  geom_col() +
+  labs(
+    x = "Year",
+    y = "Average number of stations per year",
+    fill = "Contains\nthe taxa"
+  ) +
+  facet_wrap(~commonname) +
+  scale_fill_manual(values = c("yes" = "#66a182", "no" = "grey")) +
+  scale_y_continuous(expand = c(0, 0)) +
+  # scale_x_continuous(expand = c(0.01,0)) +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)
+  )
+```
+
+```{r fig-n-stn-year, fig.cap = paste("Number of stations with and without", sp_name, "by year.")}
+stn %>%
+  group_by(startyear, commonname) %>%
+  reframe(
+    yes = sum(rho_biomass > 0, na.rm = TRUE),
+    no = sum(rho_biomass == 0, na.rm = TRUE)
+  ) %>%
+  pivot_longer(cols = c(yes, no)) %>%
+  mutate(name = factor(name, c("no", "yes"))) %>%
+  ggplot(aes(x = startyear, y = value, fill = name)) +
+  geom_col() +
+  labs(x = "Year", y = "Number of stations", fill = "Contains\ntarget taxa") +
+  facet_wrap(~commonname) +
+  scale_fill_manual(values = c("yes" = "#66a182", "no" = "grey")) +
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_x_continuous(
+    breaks = seq(1980, 2030, 5),
+    labels = substr(seq(1980, 2030, 5), 3, 4),
+    expand = c(0.01, 0)
+  ) +
+  theme(legend.position = "bottom")
+```
+
+```{r tbl-number-of-stations}
+#| tbl-cap: "Number of stations included to the study by year (All stations) and species. Shrimp and cod refer to stations taken using shrimp- and cod trawls, respectively. Zero stations indicate trawl hauls with no target species."
+
+tmp <-
+  stn %>%
+  group_by(
+    cruise,
+    startyear,
+    callsignal,
+    geartype,
+    serialnumber,
+    commonname
+  ) %>%
+  reframe(rho = sum(rho_biomass)) %>%
+  group_by(startyear, geartype, commonname) %>%
+  count() %>%
+  pivot_wider(names_from = "geartype", values_from = "n", values_fill = 0) %>%
+  full_join(
+    stn %>%
+      group_by(
+        cruise,
+        startyear,
+        callsignal,
+        geartype,
+        serialnumber,
+        commonname
+      ) %>%
+      reframe(rho = sum(rho_biomass)) %>%
+      group_by(startyear, commonname) %>%
+      reframe(`All stations` = n(), `Zero stations` = sum(rho == 0))
+  ) %>%
+  ungroup()
+
+tmp %>%
+  filter(commonname == "snabeluer") %>%
+  mutate(startyear = as.character(startyear)) %>%
+  bind_rows(
+    tibble(
+      startyear = "Total",
+      Shrimp = sum(tmp[tmp$commonname == "snabeluer", ]$Shrimp),
+      Cod = sum(tmp[tmp$commonname == "snabeluer", ]$Cod),
+      `All stations` = sum(tmp[tmp$commonname == "snabeluer", ]$`All stations`),
+      `Zero stations` = sum(
+        tmp[tmp$commonname == "snabeluer", ]$`Zero stations`
+      )
+    )
+  ) %>%
+  dplyr::select(-commonname) %>%
+  left_join(
+    tmp %>%
+      filter(commonname == "vanlig uer") %>%
+      mutate(startyear = as.character(startyear)) %>%
+      bind_rows(
+        tibble(
+          startyear = "Total",
+          Shrimp = sum(tmp[tmp$commonname == "vanlig uer", ]$Shrimp),
+          Cod = sum(tmp[tmp$commonname == "vanlig uer", ]$Cod),
+          `All stations` = sum(
+            tmp[tmp$commonname == "vanlig uer", ]$`All stations`
+          ),
+          `Zero stations` = sum(
+            tmp[tmp$commonname == "vanlig uer", ]$`Zero stations`
+          )
+        )
+      ) %>%
+      dplyr::select(-commonname),
+    by = join_by(startyear)
+  ) %>%
+  rename("Year" = "startyear") %>%
+  set_names(gsub("\\.x|\\.y", "", colnames(.))) %>%
+  knitr::kable(
+    format.args = list(big.mark = ""),
+    digits = 0
+  ) %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "condensed")) %>%
+  add_header_above(c(" " = 1, "Beaked redfish" = 4, "Golden redfish" = 4))
+```
+
+```{r tbl-n-stn-cs}
+#| tbl-cap: "Number of stations by survey time-series (All stations) and species. Zero stations mean trawl hauls with no target species."
+
+tmp <- stn %>%
+  group_by(
+    cruiseseries,
+    cruise,
+    startyear,
+    callsignal,
+    serialnumber,
+    commonname
+  ) %>%
+  reframe(rho = sum(rho_biomass)) %>%
+  group_by(cruiseseries, commonname) %>%
+  reframe(`All stations` = n(), `Zero stations` = sum(rho == 0))
+
+tmp %>%
+  filter(commonname == "snabeluer") %>%
+  bind_rows(
+    tibble(
+      cruiseseries = "Total",
+      `All stations` = sum(tmp[tmp$commonname == "snabeluer", ]$`All stations`),
+      `Zero stations` = sum(
+        tmp[tmp$commonname == "snabeluer", ]$`Zero stations`
+      )
+    )
+  ) %>%
+  dplyr::select(-commonname) %>%
+  left_join(
+    tmp %>%
+      filter(commonname == "vanlig uer") %>%
+      bind_rows(
+        tibble(
+          cruiseseries = "Total",
+          `All stations` = sum(
+            tmp[tmp$commonname == "vanlig uer", ]$`All stations`
+          ),
+          `Zero stations` = sum(
+            tmp[tmp$commonname == "vanlig uer", ]$`Zero stations`
+          )
+        )
+      ) %>%
+      dplyr::select(-commonname),
+    by = join_by(cruiseseries)
+  ) %>%
+  rename("Survey" = "cruiseseries") %>%
+  set_names(gsub("\\.x|\\.y", "", colnames(.))) %>%
+  knitr::kable(
+    format.args = list(big.mark = ""),
+    digits = 0
+  ) %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "condensed")) %>%
+  add_header_above(c(" " = 1, "Beaked redfish" = 2, "Golden redfish" = 2))
+```
+
+## Gear type
+
+```{r fig-used-bottom-trawls, fig.cap = "Overview of used bottom trawls. Reketrål means Campelen-like shrimp trawls and other names Alfredo-like cod trawls. Number in parenthesis after the name indicates number of occurrences.", fig.height=10}
+ggplot(
+  stn %>%
+    left_join(stn %>% group_by(gearname) %>% count) %>%
+    mutate(gearname = paste0(gearname, " (", n, ")")),
+  aes(x = gearname, y = log10(rho_biomass + 1))
+) +
+  geom_boxplot() +
+  theme_bw() +
+  facet_grid(cruiseseries ~ geartype, scales = "free_x") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+
+```{r tbl-trawl-overview}
+#| tbl-cap: "Overview of trawls used in the included survey time-series."
+
+colfun <- function(x) {
+  mn <- mean(x, na.rm = TRUE)
+  ifelse(
+    is.na(mn),
+    "",
+    paste(
+      round(mn, 1),
+      "\u00B1",
+      paste(round(range(x, na.rm = TRUE), 1), collapse = "-")
+    )
+  )
+}
+
+stn %>%
+  group_by(cruiseseries, gear) %>%
+  mutate(
+    verticaltrawlopening = ifelse(
+      verticaltrawlopening < 0,
+      NA,
+      verticaltrawlopening
+    )
+  ) %>%
+  reframe(
+    n = n(),
+    `Door spread (m)` = colfun(trawldoorspread),
+    `Trawl opening height (m)` = colfun(verticaltrawlopening),
+    `Trawling speed (kn)` = colfun(vesselspeed),
+    `Tow distance (nmi)` = colfun(distance),
+    `Tow duration (min)` = colfun(duration),
+    `Beaked redfish density (kg/nmi2)` = colfun(rho_biomass[
+      commonname == "snabeluer"
+    ]),
+    `Golden redfish density (kg/nmi2)` = colfun(rho_biomass[
+      commonname == "vanlig uer"
+    ])
+  ) %>%
+  left_join(
+    gearList %>%
+      mutate(gear = as.integer(gear))
+  ) %>%
+  #dplyr::select(-gear) %>%
+  dplyr::relocate(gearname, .after = "cruiseseries") %>%
+  rename(
+    "Survey series" = "cruiseseries",
+    "Gear name" = "gearname",
+    "Gear code" = "gear",
+    "Description" = "description"
+  ) %>%
+  make_table()
+```
+
+
+```{r tbl-mean-gear}
+#| tbl-cap: "Average trawl statistics (mean and range) by survey and trawl type."
+
+colfun <- function(x) {
+  mn <- mean(x, na.rm = TRUE)
+  ifelse(
+    is.na(mn),
+    "",
+    paste(
+      round(mn, 1),
+      "\u00B1",
+      paste(round(range(x, na.rm = TRUE), 1), collapse = "-")
+    )
+  )
+}
+
+stn %>%
+  mutate(
+    speed = distance / (as.numeric(duration) / 60),
+    verticaltrawlopening = ifelse(
+      verticaltrawlopening < 0,
+      NA,
+      verticaltrawlopening
+    ),
+    wirelengthratio = wirelength / bottomdepthstart
+  ) %>%
+  group_by(cruiseseries, geartype) %>%
+  mutate() %>%
+  summarise(
+    n = n(),
+    `Tow distance (nmi)` = colfun(distance),
+    `Tow duration (min)` = colfun(duration),
+    `Trawling speed (kn)` = colfun(speed),
+    `Door spread (m)` = colfun(trawldoorspread),
+    `Vertical trawl opening (m)` = colfun(verticaltrawlopening),
+    `Wire length / bottom depth` = colfun(wirelengthratio),
+    `Beaked redfish density (kg/nmi2)` = colfun(rho_biomass[
+      commonname == "snabeluer"
+    ]),
+    `Golden redfish density (kg/nmi2)` = colfun(rho_biomass[
+      commonname == "vanlig uer"
+    ])
+  ) %>%
+  rename("Survey series" = "cruiseseries", "Trawl type" = "geartype") %>%
+  make_table()
+```
+
+
+```{r fig-trawl-stat-geartype, fig.cap = "Trawl statistics by gear type."}
+
+cowplot::plot_grid(
+  ggplot(
+    stn %>% distinct(startyear, serialnumber, geartype, duration, distance),
+    aes(x = distance, fill = geartype)
+  ) +
+    geom_histogram() +
+    labs(
+      x = "Trawled distance (nmi)",
+      y = "Number of stations",
+      fill = "Survey"
+    ) +
+    # scale_y_continuous(expand = c(0,0)) +
+    ggtitle("Distance") +
+    theme(legend.position = "none"),
+  ggplot(
+    stn %>% distinct(startyear, serialnumber, geartype, duration, distance),
+    aes(x = duration, fill = geartype)
+  ) +
+    geom_histogram() +
+    labs(x = "Trawl duration (min)", y = "Number of stations") +
+    # scale_y_continuous(expand = c(0,0)) +
+    ggtitle("Duration") +
+    theme(legend.position = c(0.8, 0.8)),
+  ggplot(
+    stn %>% distinct(startyear, serialnumber, geartype, duration, distance),
+    aes(x = distance / (as.numeric(duration) / 60))
+  ) +
+    geom_histogram() +
+    labs(x = "Trawl speed (knots; nmi/h)", y = "Number of stations") +
+    # scale_y_continuous(expand = c(0,0)) +
+    ggtitle("Speed"),
+  ggplot(
+    stn %>%
+      distinct(
+        startyear,
+        serialnumber,
+        geartype,
+        duration,
+        distance,
+        trawldoorspread
+      ),
+    aes(x = trawldoorspread, fill = geartype)
+  ) +
+    geom_histogram() +
+    labs(x = "Trawl door spread (m)", y = "Number of stations") +
+    # scale_y_continuous(expand = c(0,0)) +
+    ggtitle("Door spread") +
+    theme(legend.position = "none"),
+  ggplot(
+    stn %>%
+      distinct(
+        startyear,
+        serialnumber,
+        geartype,
+        duration,
+        distance,
+        trawldoorspread,
+        verticaltrawlopening
+      ),
+    aes(x = verticaltrawlopening, fill = geartype)
+  ) +
+    geom_histogram() +
+    labs(x = "Vertical trawl opening (m)", y = "Number of stations") +
+    # scale_y_continuous(expand = c(0,0)) +
+    ggtitle("Vertical trawl opening") +
+    theme(legend.position = "none"),
+  ggplot(
+    stn %>%
+      distinct(
+        startyear,
+        serialnumber,
+        geartype,
+        duration,
+        distance,
+        trawldoorspread,
+        verticaltrawlopening,
+        wirelength,
+        bottomdepthstart
+      ),
+    aes(x = wirelength / bottomdepthstart)
+  ) +
+    geom_histogram() +
+    labs(x = "Trawl wire length / bottom depth", y = "Number of stations") +
+    # scale_y_continuous(expand = c(0,0)) +
+    ggtitle("Wire length ratio"),
+  ncol = 2,
+  byrow = FALSE
+)
+```
+
+## Effort
+
+```{r fig-trawl-duration, fig.cap = "Trawling duration by year and gear type.", fig.height=5}
+stn %>%
+  distinct(
+    startyear,
+    serialnumber,
+    platformname,
+    geartype,
+    duration,
+    distance
+  ) %>%
+  filter(!is.na(duration)) %>%
+  ggplot(aes(x = startyear, y = duration, group = startyear)) +
+  geom_jitter(color = "grey", size = 0.3) +
+  stat_summary(
+    fun.data = mean_cl_normal,
+    geom = "crossbar",
+    width = .5,
+    color = "blue"
+  ) +
+  facet_wrap(~geartype) +
+  scale_x_continuous(
+    breaks = seq(1980, 2030, 4),
+    labels = substr(seq(1980, 2030, 4), 3, 4)
+  ) +
+  coord_cartesian(ylim = c(0, NA)) +
+  labs(x = "Year", y = "Trawl duration (h)") +
+  scale_y_continuous(
+    breaks = c(0, 15, 20, 30, 60, 90, 120, 200, 250),
+    expand = c(0, 0)
+  ) +
+  theme_bw()
+```
+
+```{r fig-trawl-distance, fig.cap = "Trawling distance by year and gear type.", fig.height=5}
+stn %>%
+  distinct(startyear, serialnumber, platformname, geartype, distance) %>%
+  ggplot(aes(x = startyear, y = distance, group = startyear)) +
+  geom_jitter(color = "grey", size = 0.3) +
+  stat_summary(
+    fun.data = mean_cl_normal,
+    geom = "crossbar",
+    width = .5,
+    color = "blue"
+  ) +
+  facet_wrap(~geartype) +
+  coord_cartesian(ylim = c(0, NA)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_x_continuous(
+    breaks = seq(1980, 2030, 4),
+    labels = substr(seq(1980, 2030, 4), 3, 4)
+  ) +
+  labs(x = "Year", y = "Trawl distance (nmi)") +
+  theme_bw()
+```
+
+```{r fig-trawl-distance-cs, fig.cap = "Trawled distance by survey time series"}
+stn %>%
+  distinct(
+    startyear,
+    serialnumber,
+    geartype,
+    duration,
+    distance,
+    cruise,
+    cruiseseries,
+    trawldoorspread,
+    verticaltrawlopening,
+    wirelength,
+    bottomdepthstart
+  ) %>%
+  ggplot(aes(x = distance)) +
+  geom_histogram() +
+  labs(x = "Trawled distance (nmi)", y = "Number of stations") +
+  facet_wrap(~cruiseseries, scales = "free_y") +
+  scale_y_continuous(expand = c(0, 0))
+```
+
+## Timing
+
+There were `r stn %>% dplyr::select(startyear, cruise) %>% distinct() %>% nrow()` cruises in the dataset. These have been allocated to `r length(unique(stn$cruiseseries))` survey time-series. Some of the choices in survey time-series allocation is arbitrary. 
+
+```{r, fig-survey-time, fig.cap = "Overview of survey timing. Cruises have been separated.", fig.height=14}
+
+tmp <- stn %>%
+  filter(!is.na(stationstartdate)) %>%
+  mutate(
+    yday = as.Date(lubridate::yday(stationstartdate) - 1, origin = "2023-01-01")
+  ) %>%
+  group_by(
+    startyear,
+    cruise,
+    cruiseseries,
+    platformname,
+    callsignal,
+    geartype
+  ) %>%
+  reframe(min = min(yday), max = max(yday)) %>%
+  split(.$startyear) %>%
+  map(function(k) {
+    if (nrow(k) > 9) {
+      seq_vec <- scales::rescale(1:nrow(k), c(0, 0.9))
+    } else {
+      seq_vec <- seq(0, 0.9, 0.1)
+    }
+    k %>%
+      mutate(ypos = startyear + seq_vec[1:nrow(k)])
+  }) %>%
+  bind_rows()
+
+pp <- tmp %>%
+  ggplot(aes(
+    x = min,
+    xend = max,
+    y = ypos,
+    yend = ypos,
+    color = cruiseseries,
+    text = paste0(
+      "\ncruiseseries: ",
+      cruiseseries,
+      "\nstartyear: ",
+      startyear,
+      "\ncruise: ",
+      cruise,
+      "\nplatformname: ",
+      platformname,
+      "\ngeartype: ",
+      geartype,
+      "\nstart: ",
+      gsub("2023-", "", as.character(min)),
+      "\nstop: ",
+      gsub("2023-", "", as.character(max))
+    )
+  )) +
+  geom_segment(linewidth = 2, alpha = 0.7) +
+  scale_x_date("Month", date_labels = "%b", date_breaks = "1 months") +
+  scale_y_continuous("Year", breaks = seq(1980, 2030, 1), expand = c(0.01, 0)) +
+  coord_cartesian(ylim = c(NA, round_any(max(tmp$ypos), 1, ceiling))) +
+  # scale_color_manual("Survey", values = survey_cols) +
+  theme_bw() +
+  theme(panel.grid.minor.y = element_blank())
+
+if (knitr::is_html_output()) {
+  plotly::ggplotly(pp, tooltip = c("text"))
+} else {
+  pp
+}
+```
+
+```{r fig-survey-time-averaged, fig.cap = "Timing of each survey averaged over years and cruises", fig.height=6}
+tmp %>%
+  group_by(cruiseseries, startyear) %>%
+  reframe(min = mean(min), max = mean(max)) %>%
+  group_by(cruiseseries) %>%
+  reframe(min = mean(min), max = mean(max)) %>%
+  ggplot(aes(
+    x = min,
+    xend = max,
+    y = cruiseseries,
+    yend = cruiseseries,
+    color = cruiseseries
+  )) +
+  geom_segment(linewidth = 2, alpha = 0.7) +
+  scale_x_date("Month", date_labels = "%b", date_breaks = "1 months") +
+  labs(y = "Survey time-series", color = "Survey\ntime-series") +
+  theme_bw() +
+  theme(panel.grid.minor.y = element_blank())
+```
+
+
+## Response distribution
+
+```{r fig-bm-density-comparison, fig.cap="Biomass density differences among cruise series (a-b) and gear categories (c-d). b and d have zero densities removed."}
+cowplot::plot_grid(
+  ggplot(stn, aes(x = cruiseseries, y = rho_biomass)) +
+    geom_boxplot() +
+    scale_y_continuous(
+      trans = "log1p",
+      breaks = c(0, 10, 1e2, 1e3, 1e4, 5e4, 1.5e5, 5e5)
+    ) +
+    scale_x_discrete(guide = guide_axis(angle = 90)) +
+    facet_wrap(~commonname) +
+    labs(
+      x = "Cruise series",
+      y = expression(paste("Density (kg ", nmi^-2, ")"))
+    ),
+
+  ggplot(
+    stn %>%
+      filter(rho_biomass > 0),
+    aes(x = cruiseseries, y = rho_biomass)
+  ) +
+    geom_boxplot() +
+    scale_y_continuous(
+      trans = "log1p",
+      breaks = c(0, 10, 1e2, 1e3, 1e4, 5e4, 1.5e5, 5e5)
+    ) +
+    scale_x_discrete(guide = guide_axis(angle = 90)) +
+    expand_limits(y = 0) +
+    facet_wrap(~commonname) +
+    labs(
+      x = "Cruise series",
+      y = expression(paste("Density (kg ", nmi^-2, ")"))
+    ) +
+    theme(axis.title.y = element_blank()),
+
+  ggplot(
+    stn %>%
+      mutate(gearname = ifelse(grepl("^32", gear), "Shrimp", "Cod")),
+    aes(x = gearname, y = rho_biomass)
+  ) +
+    geom_boxplot() +
+    facet_wrap(~commonname) +
+    scale_y_continuous(
+      trans = "log1p",
+      breaks = c(0, 10, 1e2, 1e3, 1e4, 5e4, 1.5e5, 5e5)
+    ) +
+    labs(x = "Trawl type", y = expression(paste("Density (kg ", nmi^-2, ")"))),
+
+  ggplot(
+    stn %>%
+      filter(rho_biomass > 0) %>%
+      mutate(gearname = ifelse(grepl("^32", gear), "Shrimp", "Cod")),
+    aes(x = gearname, y = rho_biomass)
+  ) +
+    geom_boxplot() +
+    scale_y_continuous(
+      trans = "log1p",
+      breaks = c(0, 10, 1e2, 1e3, 1e4, 5e4, 1.5e5, 5e5)
+    ) +
+    expand_limits(y = 0) +
+    facet_wrap(~commonname) +
+    labs(x = "Trawl type", y = expression(paste("Density (kg ", nmi^-2, ")"))) +
+    theme(axis.title.y = element_blank()),
+
+  labels = "auto"
+)
+```
+
+```{r bm-density-depth, fig.cap = "Bottom depth versus swept area biomass density of each trawl haul (grey dots) allocated to species. The blue line and shading represents loess smoother and standard error. The y-axis is log + 1 transformed.", fig.height=10}
+ggplot(stn, aes(x = bottomdepthstart, y = rho_biomass)) +
+  geom_point(color = "grey", size = 0.3) +
+  geom_smooth(fill = "blue") +
+  labs(
+    x = "Bottom depth (m)",
+    y = expression(paste("Density (kg ", nmi^-2, ")"))
+  ) +
+  facet_grid(cruiseseries ~ commonname) +
+  scale_y_continuous(
+    trans = "log1p",
+    breaks = c(0, 10, 1e2, 1e3, 1e4, 5e4, 1.5e5, 5e5),
+    expand = c(0.01, 0)
+  ) +
+  coord_cartesian(ylim = c(0, NA)) +
+  theme_bw(base_size = 10) +
+  scale_x_continuous(breaks = seq(0, 2000, 200), expand = c(0.01, 0))
+```
+
+
+```{r}
+#| label: fig-year-dist
+#| fig-height: 5
+#| fig-cap: Swept area density of each trawl haul (grey dots) by year and species. Crossbars indicate mean values and 95% confidence intervals. Blue cross bars are for all data, red for only positive data. The y-axis is log + 1 transformed. Dark red dots indicate trawl hauls that were deemed outliers by the set criterion and removed from further analyses.
+
+stn %>%
+  ggplot(aes(x = startyear, y = value)) +
+  geom_jitter(size = 0.3, color = "grey70") +
+  stat_summary(
+    data = stn %>% filter(value > 0),
+    fun.data = mean_cl_normal,
+    geom = "crossbar",
+    width = .5,
+    color = "red"
+  ) +
+  stat_summary(
+    data = stn,
+    fun.data = mean_cl_normal,
+    geom = "crossbar",
+    width = .5,
+    color = "blue"
+  ) +
+  labs(x = "Year", y = value_name) +
+  facet_wrap(~commonname) +
+  scale_x_continuous(
+    breaks = seq(1980, 2030, 4),
+    labels = substr(seq(1980, 2030, 4), 3, 4),
+    expand = c(0.01, 0)
+  ) +
+  scale_y_continuous(
+    trans = "log1p",
+    breaks = c(
+      0,
+      1,
+      10,
+      100,
+      1e3,
+      5e3,
+      1e4,
+      2.5e4,
+      5e4,
+      1e5,
+      2e5,
+      3e5,
+      5e5,
+      1e6
+    ),
+    expand = c(0.01, 0)
+  ) +
+  # coord_trans(y = "log1p") +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    legend.position = "none"
+  )
+```
+
+
+```{r}
+#| label: fig-depth-dist
+#| fig-cap: Bottom depth related to swept area density of each trawl haul (grey dots). The blue and red line and shading represent loess smoother and standard error for all data and only positive values, respectively. The y-axis is log + 1 transformed.
+#| fig-height: 5
+
+ggplot(data = stn, aes(x = bottomdepthstart, y = value)) +
+  geom_point(color = "grey", size = 0.3) +
+  geom_smooth(fill = "blue", color = "blue") +
+  geom_smooth(data = stn %>% filter(value > 0), fill = "red", color = "red") +
+  facet_wrap(~commonname) +
+  labs(x = "Bottom depth (m)", y = value_name) +
+  scale_y_continuous(
+    trans = "log1p",
+    breaks = c(
+      0,
+      1,
+      10,
+      100,
+      1e3,
+      5e3,
+      1e4,
+      2.5e4,
+      5e4,
+      1e5,
+      2e5,
+      3e5,
+      5e5,
+      1e6
+    ),
+    expand = c(0.01, 0)
+  ) +
+  coord_cartesian(ylim = c(0, NA)) +
+  theme_bw(base_size = 10) +
+  scale_x_continuous(breaks = seq(0, 2000, 200), expand = c(0.01, 0))
+```
+
+```{r}
+#| label: fig-seasonal-dist
+#| fig-cap: Ordinal date related to log+1 transformed swept area biomass density of each trawl haul (grey dots). The blue and red line and shading represent loess smoother and standard error for all data and only positive values, respectively. The y-axis is log + 1 transformed.
+#| fig-height: 5
+
+ggplot(data = stn, aes(x = as.Date(yday, "2023-01-01"), y = value)) +
+  geom_point(color = "grey", size = 0.3) +
+  geom_smooth(fill = "blue", color = "blue") +
+  geom_smooth(data = stn %>% filter(value > 0), fill = "red", color = "red") +
+  facet_wrap(~commonname) +
+  labs(x = "Month", y = value_name) +
+  scale_y_continuous(
+    trans = "log1p",
+    breaks = c(
+      0,
+      1,
+      10,
+      100,
+      1e3,
+      5e3,
+      1e4,
+      2.5e4,
+      5e4,
+      1e5,
+      2e5,
+      3e5,
+      5e5,
+      1e6
+    ),
+    expand = c(0.01, 0)
+  ) +
+  coord_cartesian(
+    ylim = c(0, NA),
+    xlim = as.Date(c("2023-01-01", "2023-12-31"))
+  ) +
+  theme_bw(base_size = 10) +
+  scale_x_date(date_labels = "%b", date_breaks = "1 months", expand = c(0, 0))
+```
+
+
+## Coverage
+
+Annual survey coverage was estimated using a concave hull algorithm from the [concaveman](https://CRAN.R-project.org/package=concaveman) package:
+
+```{r coverage-calculus}
+sf_use_s2(FALSE)
+
+survey_coverage <- stn %>%
+  distinct(
+    cruiseseries,
+    startyear,
+    cruise,
+    platformname,
+    serialnumber,
+    geartype,
+    stationstartdate,
+    longitudestart,
+    latitudestart
+  ) %>%
+  group_by(startyear) %>%
+  st_as_sf(
+    coords = c("longitudestart", "latitudestart"),
+    crs = 4326
+  ) %>%
+  summarise(geometry = st_combine(geometry)) %>%
+  sf::st_transform(32636) %>%
+  split(.$startyear) %>%
+  map(function(k) {
+    # message(unique(k$startyear))
+    concaveman::concaveman(k, concavity = 1) %>%
+      rename(geometry = polygons) %>%
+      st_make_valid() %>%
+      mutate(
+        startyear = unique(k$startyear),
+        area = sf::st_area(.) %>% set_units("km^2"),
+        .before = 1
+      )
+  }) %>%
+  bind_rows()
+
+tmp <- dt %>%
+  distinct(
+    cruiseseries,
+    startyear,
+    cruise,
+    platformname,
+    serialnumber,
+    geartype,
+    stationstartdate,
+    longitudestart,
+    latitudestart
+  ) %>%
+  group_by(startyear, geartype) %>%
+  st_as_sf(
+    coords = c("longitudestart", "latitudestart"),
+    crs = 4326
+  ) %>%
+  summarise(geometry = st_combine(geometry)) %>%
+  sf::st_transform(32636) %>%
+  split(list(.$startyear, .$geartype), drop = TRUE) %>%
+  map(function(k) {
+    # message(unique(k$startyear))
+    if ((k %>% sf::st_coordinates() %>% nrow()) < 3) {
+      tibble(
+        startyear = unique(k$startyear),
+        geartype = unique(k$geartype),
+        area = 0
+      )
+    } else {
+      concaveman::concaveman(k, concavity = 1) %>%
+        rename(geometry = polygons) %>%
+        st_make_valid() %>%
+        mutate(
+          startyear = unique(k$startyear),
+          geartype = unique(k$geartype),
+          area = sf::st_area(.) %>% set_units("km^2"),
+          .before = 1
+        ) %>%
+        st_drop_geometry() %>%
+        mutate(area = as.numeric(area) / 1e6)
+    }
+  }) %>%
+  bind_rows() %>%
+  # group_by(startyear, geartype) %>%
+  complete(startyear, geartype, fill = list(area = 0))
+
+sf_use_s2(TRUE)
+```
+
+
+```{r fig-coverage-map, fig.cap = "Map showing the polygons for estimated survey coverage by year.", fig.height=12}
+basemap(dt) +
+  geom_sf(data = survey_coverage, aes(fill = as.numeric(area))) +
+  facet_wrap(~startyear, ncol = map_ncol) +
+  scale_fill_viridis_c() +
+  labs(fill = expression(paste("Survey coverage (", kg^2, ")"))) +
+  theme(legend.position = "bottom")
+```
+
+
+```{r fig-coverage-line-plot, fig.height=4, fig.cap = "Survey coverage over time"}
+survey_coverage %>%
+  st_drop_geometry() %>%
+  mutate(geartype = "Both") %>%
+  mutate(area = as.numeric(area) / 1e6) %>%
+  bind_rows(tmp) %>%
+  ggplot(aes(x = startyear, y = area, color = geartype)) +
+  geom_path() +
+  labs(
+    y = expression(paste("Survey coverage (million ", km^2, ")")),
+    x = "Year",
+    color = "Gear type"
+  ) +
+  coord_cartesian(
+    ylim = c(0, round(max(as.numeric(survey_coverage$area) / 1e6), 1))
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.02))) +
+  scale_x_continuous(
+    expand = c(0.01, 0),
+    breaks = seq(1980, 2030, 2),
+    labels = substr(seq(1980, 2030, 2), 3, 4)
+  ) +
+  theme_bw(base_size = 10)
+```
+
+# Length based data
+
+Length-based data was used to compile the length-group resolved sub-models and survey indices in the manuscript. First, the dataset was filtered for surveys were each species, beaked ("snabeluer") and golden ("vanlig uer") redfish, was consistently recorded. Then, some length-groups were merged to help model convergance. The merging was done based on experimentation and visual inspection of data availablity. We used swept area abundance density as a response variable in consequent analyses involving length-based data. 
+
+```{r}
+dt <- lapply(c("snabeluer", "vanlig uer"), function(filter_sp) {
+  out <- dt %>%
+    distinct() %>%
+    filter(commonname %in% filter_sp) %>%
+    mutate(gear = if_else(gear == 3178, 3181, gear)) %>%
+    mutate(gear_width = 25) %>%
+    mutate(
+      cruiseseries = factor(cruiseseries),
+      id = paste(
+        cruiseseries,
+        startyear,
+        platformname,
+        serialnumber,
+        sep = "-"
+      ),
+      swept_area = (gear_width / 1852) * distance
+    ) %>%
+    mutate(yday = lubridate::yday(stationstartdate), .before = season) %>%
+    mutate(month = as.integer(month)) %>%
+    droplevels() %>%
+    mutate(
+      rho_biomass = weight / swept_area,
+      rho_abundance = n / swept_area,
+      value = rho_abundance
+    ) %>% # this defines the response type
+    filter(!is.na(value))
+
+  tmp <- out %>%
+    group_by(cruiseseries, cruise, startyear, platformname) %>%
+    reframe(sum = sum(value)) %>%
+    filter(sum == 0) %>%
+    mutate(tmpid = paste(cruise, startyear, platformname))
+
+  out <- out %>%
+    mutate(tmpid = paste(cruise, startyear, platformname)) %>%
+    filter(!tmpid %in% tmp$tmpid) %>%
+    dplyr::select(-tmpid)
+
+  if (filter_sp == "snabeluer") {
+    out %>%
+      mutate(
+        length_group = recode(
+          length_group,
+          "(0,5]" = "(0,10]",
+          "(5,10]" = "(0,10]",
+          "(40,45]" = "(40,Inf]",
+          "(45,50]" = "(40,Inf]",
+          "(50,55]" = "(40,Inf]",
+          "(55,60]" = "(40,Inf]",
+          "(60,65]" = "(40,Inf]",
+          "(65,70]" = "(40,Inf]",
+          "(70,75]" = "(40,Inf]",
+          "(75,80]" = "(40,Inf]",
+          "(80,85]" = "(40,Inf]",
+          "(85,90]" = "(40,Inf]",
+          "(90,95]" = "(40,Inf]"
+        )
+      ) %>%
+      group_by(
+        across(c(-n, -weight, -rho_biomass, -rho_abundance, -value))
+      ) %>%
+      reframe(
+        n = sum(n, na.rm = TRUE),
+        weight = sum(weight, na.rm = TRUE),
+        rho_abundance = sum(rho_abundance, na.rm = TRUE),
+        rho_biomass = sum(rho_biomass, na.rm = TRUE),
+        value = sum(value, na.rm = TRUE)
+      )
+  } else if (filter_sp == "vanlig uer") {
+    out %>%
+      mutate(
+        length_group = recode(
+          length_group,
+          "(0,5]" = "(0,15]",
+          "(5,10]" = "(0,15]",
+          "(10,15]" = "(0,15]",
+          "(40,45]" = "(40,55]",
+          "(45,50]" = "(40,55]",
+          "(50,55]" = "(40,55]",
+          "(55,60]" = "(55,Inf]",
+          "(60,65]" = "(55,Inf]",
+          "(65,70]" = "(55,Inf]",
+          "(70,75]" = "(55,Inf]",
+          "(75,80]" = "(55,Inf]",
+          "(80,85]" = "(55,Inf]",
+          "(85,90]" = "(55,Inf]",
+          "(90,95]" = "(55,Inf]"
+        )
+      ) %>%
+      group_by(
+        across(c(-n, -weight, -rho_biomass, -rho_abundance, -value))
+      ) %>%
+      reframe(
+        n = sum(n, na.rm = TRUE),
+        weight = sum(weight, na.rm = TRUE),
+        rho_abundance = sum(rho_abundance, na.rm = TRUE),
+        rho_biomass = sum(rho_biomass, na.rm = TRUE),
+        value = sum(value, na.rm = TRUE)
+      )
+  }
+}) %>%
+  bind_rows()
+
+dt$length_group <- factor(
+  as.character(dt$length_group),
+  levels = levels(dt$length_group)[
+    order(as.integer(
+      gsub("\\(", "", sapply(strsplit(levels(dt$length_group), ","), "[", 1))
+    ))
+  ]
+)
+```
+
+```{r, echo = FALSE}
+value_name <- expression(paste("Density (n ", nmi^-2, ")"))
+```
+
+
+The length-based dataset for beaked and golden redfish, respectively, contained `r dt %>% filter(commonname == "snabeluer") %>% distinct(startyear, platformname, serialnumber) %>% nrow()` and `r dt %>% filter(commonname == "vanlig uer") %>% distinct(startyear, platformname, serialnumber) %>% nrow()` bottom trawl hauls collected over `r dt %>% distinct(startyear) %>% nrow()` years, from `r min(dt$startyear)` to `r max(dt$startyear)`, during `r dt %>% filter(commonname == "snabeluer") %>% distinct(startyear, cruise, platformname) %>% nrow()` and `r dt %>% filter(commonname == "vanlig uer") %>%  distinct(startyear, cruise, platformname) %>% nrow()` surveys. Evaluated from count information, `r dt %>% filter(commonname == "snabeluer", value > 0, !is.na(value)) %>% distinct(startyear, platformname, serialnumber) %>% nrow()` of these stations contained beaked redfish, `r dt %>% filter(commonname == "vanlig uer", value > 0, !is.na(value)) %>% distinct(startyear, platformname, serialnumber) %>% nrow()` and golden redfish. `r dt %>% group_by(startyear, platformname, serialnumber, commonname) %>% reframe(value = sum(value, na.rm = TRUE)) %>% filter(commonname == "snabeluer", value == 0, !is.na(value)) %>% nrow()` and `r dt %>% group_by(startyear, platformname, serialnumber, commonname) %>% reframe(value = sum(value, na.rm = TRUE)) %>% filter(commonname == "vanlig uer", value == 0, !is.na(value)) %>% nrow()` trawl hauls did not contain beaked redfish and golden redfish, respectively. `r dt$stationstartdate %>% max` is the latest record in the dataset. 
+
+```{r}
+#| label: fig-n-stn-lb
+#| fig-height: 8
+#| fig-cap: Number of stations with and without beaked and golden redfish by year allocated to length groups.
+
+dt %>%
+  group_by(startyear, commonname, length_group) %>%
+  reframe(
+    yes = sum(value > 0, na.rm = TRUE),
+    no = sum(value == 0, na.rm = TRUE)
+  ) %>%
+  pivot_longer(cols = c(yes, no)) %>%
+  mutate(name = factor(name, c("no", "yes"))) %>%
+  ggplot(aes(x = startyear, y = value, fill = name)) +
+  geom_col() +
+  labs(x = "Year", y = "Number of stations", fill = "Contains\ntarget taxa") +
+  facet_wrap(commonname ~ length_group) +
+  scale_fill_manual(values = c("yes" = "#66a182", "no" = "grey")) +
+  scale_y_continuous(expand = c(0.01, 0)) +
+  scale_x_continuous(
+    breaks = seq(1980, 2030, 5),
+    labels = substr(seq(1980, 2030, 5), 3, 4),
+    expand = c(0.01, 0)
+  ) +
+  theme(legend.position = "bottom")
+```
+
+## Length distributions
+
+```{r, fig.cap = "Average biomass density + 95% confidence interval by survey time-series and length group for the combined station and length dataset.", fig.height=7}
+
+length_groups <- dt %>%
+  filter(rho_biomass > 0 & !is.na(rho_biomass)) %>%
+  droplevels() %>%
+  pull(length_group) %>%
+  levels()
+
+dt %>%
+  filter(length_group %in% length_groups) %>%
+  droplevels() %>%
+  group_by(cruiseseries, commonname, length_group) %>%
+  reframe(
+    value = mean(rho_biomass, na.rm = TRUE),
+    se = sd(rho_biomass, na.rm = TRUE) / sqrt(length(!is.na(rho_biomass)))
+  ) %>%
+  ggplot(aes(
+    x = length_group,
+    y = value,
+    ymin = value,
+    ymax = value + 1.96 * se
+  )) +
+  geom_col(
+    color = "black",
+    linewidth = 0.3,
+    position = "dodge",
+    fill = "grey"
+  ) +
+  geom_errorbar(width = 0.2, linewidth = 0.3) +
+  facet_grid(cruiseseries ~ commonname, scales = "free") +
+  labs(
+    y = expression(paste("Average density (kg ", nmi^-2, ")")),
+    x = "Length group (cm)"
+  ) +
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  coord_cartesian(expand = FALSE) +
+  theme(
+    legend.position = "bottom",
+    strip.background = element_blank(),
+    strip.text = element_text(size = 10, face = 2)
+  )
+```
+
+```{r, fig.cap = "Average abundance density + 95% confidence interval by survey time-series for the combined station and length dataset.", fig.height=7}
+
+length_groups <- dt %>%
+  filter(rho_abundance > 0, !is.na(rho_abundance)) %>%
+  droplevels() %>%
+  pull(length_group) %>%
+  levels()
+
+dt %>%
+  filter(length_group %in% length_groups) %>%
+  droplevels() %>%
+  group_by(cruiseseries, commonname, length_group) %>%
+  reframe(
+    value = mean(rho_abundance, na.rm = TRUE),
+    se = sd(rho_abundance, na.rm = TRUE) / sqrt(length(!is.na(rho_abundance)))
+  ) %>%
+  ggplot(aes(
+    x = length_group,
+    y = value,
+    ymin = value,
+    ymax = value + 1.96 * se
+  )) +
+  geom_col(
+    color = "black",
+    linewidth = 0.3,
+    position = "dodge",
+    fill = "grey"
+  ) +
+  geom_errorbar(width = 0.2, linewidth = 0.3) +
+  facet_grid(cruiseseries ~ commonname, scales = "free") +
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  labs(
+    y = expression(paste("Average density (n ", nmi^-2, ")")),
+    x = "Length group (cm)"
+  ) +
+  coord_cartesian(expand = FALSE) +
+  theme(
+    legend.position = "bottom",
+    strip.background = element_blank(),
+    strip.text = element_text(size = 10, face = 2)
+  )
+```
+
+```{r fig-ldist-snabel, fig.cap = "Average biomass (A) and abundance (B) density of beaked redfish + 95% confidence interval by year and length group for the combined station and length dataset.", fig.height=12}
+length_groups <- dt %>%
+  filter(commonname == "snabeluer", rho_biomass > 0) %>%
+  droplevels() %>%
+  pull(length_group) %>%
+  levels()
+
+p1 <- dt %>%
+  filter(commonname == "snabeluer") %>%
+  filter(length_group %in% length_groups) %>%
+  droplevels() %>%
+  group_by(startyear, length_group) %>%
+  reframe(
+    value = mean(rho_biomass, na.rm = TRUE),
+    se = sd(rho_biomass, na.rm = TRUE) / sqrt(length(!is.na(rho_biomass)))
+  ) %>%
+  ggplot(aes(
+    x = length_group,
+    y = value,
+    ymin = value,
+    ymax = value + 1.96 * se
+  )) +
+  geom_col(
+    color = "black",
+    linewidth = 0.3,
+    position = "dodge",
+    fill = "grey"
+  ) +
+  geom_errorbar(width = 0.2, linewidth = 0.3) +
+  facet_wrap(~startyear, ncol = 6, dir = "v", scales = "free_y") +
+  labs(
+    y = expression(paste("Average density (kg ", nmi^-2, ")")),
+    x = "Length group (cm)"
+  ) +
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  coord_cartesian(expand = FALSE) +
+  theme(
+    legend.position = "bottom",
+    strip.background = element_blank(),
+    strip.text = element_text(size = 10, face = 2)
+  )
+
+p2 <- dt %>%
+  filter(commonname == "snabeluer") %>%
+  filter(length_group %in% length_groups) %>%
+  droplevels() %>%
+  group_by(startyear, length_group) %>%
+  reframe(
+    value = mean(rho_abundance, na.rm = TRUE),
+    se = sd(rho_abundance, na.rm = TRUE) / sqrt(length(!is.na(rho_abundance)))
+  ) %>%
+  ggplot(aes(
+    x = length_group,
+    y = value,
+    ymin = value,
+    ymax = value + 1.96 * se
+  )) +
+  geom_col(
+    color = "black",
+    linewidth = 0.3,
+    position = "dodge",
+    fill = "grey"
+  ) +
+  geom_errorbar(width = 0.2, linewidth = 0.3) +
+  facet_wrap(~startyear, ncol = 6, dir = "v", scales = "free_y") +
+  labs(
+    y = expression(paste("Average density (n ", nmi^-2, ")")),
+    x = "Length group (cm)"
+  ) +
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  coord_cartesian(expand = FALSE) +
+  theme(
+    legend.position = "bottom",
+    strip.background = element_blank(),
+    strip.text = element_text(size = 10, face = 2)
+  )
+
+cowplot::plot_grid(p1, p2, labels = "AUTO", ncol = 1)
+```
+
+```{r fig-ldist-vanlig, fig.cap = "Average biomass (A) and abundance (B) density of golden redfish + 95% confidence interval by year and length group for the combined station and length dataset.", fig.height=12}
+
+length_groups <- dt %>%
+  filter(commonname == "vanlig uer", rho_biomass > 0) %>%
+  droplevels() %>%
+  pull(length_group) %>%
+  levels()
+
+p1 <- dt %>%
+  filter(commonname == "vanlig uer") %>%
+  filter(length_group %in% length_groups) %>%
+  droplevels() %>%
+  group_by(startyear, length_group) %>%
+  reframe(
+    value = mean(rho_biomass, na.rm = TRUE),
+    se = sd(rho_biomass, na.rm = TRUE) / sqrt(length(!is.na(rho_biomass)))
+  ) %>%
+  ggplot(aes(
+    x = length_group,
+    y = value,
+    ymin = value,
+    ymax = value + 1.96 * se
+  )) +
+  geom_col(
+    color = "black",
+    linewidth = 0.3,
+    position = "dodge",
+    fill = "grey"
+  ) +
+  geom_errorbar(width = 0.2, linewidth = 0.3) +
+  facet_wrap(~startyear, ncol = 6, dir = "v", scales = "free_y") +
+  labs(
+    y = expression(paste("Average density (kg ", nmi^-2, ")")),
+    x = "Length group (cm)"
+  ) +
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  coord_cartesian(expand = FALSE) +
+  theme(
+    legend.position = "bottom",
+    strip.background = element_blank(),
+    strip.text = element_text(size = 10, face = 2)
+  )
+
+p2 <- dt %>%
+  filter(commonname == "vanlig uer") %>%
+  filter(length_group %in% length_groups) %>%
+  droplevels() %>%
+  group_by(startyear, length_group) %>%
+  reframe(
+    value = mean(rho_abundance, na.rm = TRUE),
+    se = sd(rho_abundance, na.rm = TRUE) / sqrt(length(!is.na(rho_abundance)))
+  ) %>%
+  ggplot(aes(
+    x = length_group,
+    y = value,
+    ymin = value,
+    ymax = value + 1.96 * se
+  )) +
+  geom_col(
+    color = "black",
+    linewidth = 0.3,
+    position = "dodge",
+    fill = "grey"
+  ) +
+  geom_errorbar(width = 0.2, linewidth = 0.3) +
+  facet_wrap(~startyear, ncol = 6, dir = "v", scales = "free_y") +
+  labs(
+    y = expression(paste("Average density (n ", nmi^-2, ")")),
+    x = "Length group (cm)"
+  ) +
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  coord_cartesian(expand = FALSE) +
+  theme(
+    legend.position = "bottom",
+    strip.background = element_blank(),
+    strip.text = element_text(size = 10, face = 2)
+  )
+
+cowplot::plot_grid(p1, p2, labels = "AUTO", ncol = 1)
+```
+
+## Maps 
+
+```{r fig-sp-comp-map, fig.cap = paste("Spatial distribution of", sp_name, "taxa across all years and surveys measured using average biomass density. Size of the pie charts refers to the average total biomass density."), fig.height=10}
+# cols <- c("Male" = "#449BCF", "Female" = "#FF5F68", "Unknown" = "grey")
+by <- "commonname"
+base_size <- 10
+legend_lab <- "Redfish taxa"
+
+bm <- basemap(
+  stn,
+  bathy.style = "rcg",
+  legends = FALSE,
+  base_size = base_size
+) +
+  ggnewscale::new_scale_fill() +
+  geom_col(
+    data = data.frame(
+      z = factor(levels(dt[[by]]), levels(dt[[by]])),
+      x = 1,
+      y = 1
+    ),
+    aes(x = x, y = y, fill = z)
+  ) +
+  labs(xlab = NULL, ylab = NULL, fill = legend_lab) +
+  # scale_fill_manual(values = cols, drop = FALSE) +
+  theme(
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    plot.title = element_text(hjust = 0.5, size = base_size),
+    plot.margin = unit(c(0.2, 0, 0.2, 0), "cm")
+  )
+
+roi <- stn %>%
+  st_as_sf(coords = c("longitudestart", "latitudestart"), crs = 4326) %>%
+  sf::st_transform(attributes(bm)$crs) %>%
+  summarise(geometry = st_combine(geometry)) %>%
+  concaveman::concaveman(concavity = 3) %>%
+  st_make_valid() %>%
+  st_buffer(5e4)
+
+grid <- roi %>%
+  st_make_grid(n = c(15, 15), what = "polygons") %>%
+  st_sf()
+
+grid_clip <- sf::st_intersection(grid, roi)
+
+tmp <- dt %>%
+  filter(!is.na(rho_biomass)) %>%
+  group_by(
+    cruiseseries,
+    startyear,
+    cruise,
+    platformname,
+    serialnumber,
+    longitudestart,
+    latitudestart,
+    bottomdepthstart,
+    commonname
+  ) %>%
+  reframe(value = sum(rho_biomass)) %>%
+  st_as_sf(coords = c("longitudestart", "latitudestart"), crs = 4326) %>%
+  sf::st_transform(attributes(bm)$crs) %>%
+  add_column(grid = as.integer(st_intersects(., grid_clip))) %>%
+  group_by(grid, commonname) %>%
+  reframe(value = mean(value)) %>%
+  group_by(grid) %>%
+  mutate(total = sum(value)) %>%
+  left_join(
+    grid_clip %>%
+      st_centroid() %>%
+      st_coordinates() %>%
+      as_tibble() %>%
+      add_column(grid = 1:nrow(.), .before = 1)
+  ) %>%
+  ungroup() %>%
+  mutate(scal = sqrt(total / max(.$total)) * 4e4 + 3e4) %>%
+  group_by(grid, X, Y, total, scal)
+
+
+df.grobs <- tmp %>%
+  filter(total > 0) %>%
+  do(
+    subplots = ggplot(., aes(x = 1, y = value, fill = commonname)) +
+      geom_col(
+        position = "fill",
+        alpha = 0.75,
+        colour = "white",
+        linewidth = LS(0.5)
+      ) +
+      coord_polar(theta = "y") +
+      # scale_fill_manual(values = cols, drop = FALSE) +
+      theme_void() +
+      guides(fill = "none")
+  ) %>%
+  mutate(
+    subgrobs = list(annotation_custom(
+      ggplotGrob(subplots),
+      xmin = (X - scal),
+      ymin = (Y - scal),
+      xmax = (X + scal),
+      ymax = (Y + scal)
+    ))
+  )
+
+bm + df.grobs$subgrobs
+```
+
+```{r fig-size-map-snabel, fig.cap = "Spatial distribution of beaked redfish size classes across all years and surveys measured using average biomass density. Size of the pie charts refers to the average total biomass density.", fig.height=10}
+
+length_groups <- dt %>%
+  filter(commonname == "snabeluer", rho_biomass > 0) %>%
+  droplevels() %>%
+  pull(length_group) %>%
+  levels()
+
+by <- "length_group"
+base_size <- 10
+legend_lab <- "Size class"
+
+bm <- basemap(
+  stn,
+  bathy.style = "rcg",
+  legends = FALSE,
+  base_size = base_size
+) +
+  ggnewscale::new_scale_fill() +
+  geom_col(
+    data = data.frame(z = factor(length_groups, length_groups), x = 1, y = 1),
+    aes(x = x, y = y, fill = z)
+  ) +
+  labs(xlab = NULL, ylab = NULL, fill = legend_lab) +
+  scale_fill_viridis_d() +
+  theme(
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    plot.title = element_text(hjust = 0.5, size = base_size),
+    plot.margin = unit(c(0.2, 0, 0.2, 0), "cm")
+  )
+
+roi <- stn %>%
+  st_as_sf(coords = c("longitudestart", "latitudestart"), crs = 4326) %>%
+  sf::st_transform(attributes(bm)$crs) %>%
+  summarise(geometry = st_combine(geometry)) %>%
+  concaveman::concaveman(concavity = 3) %>%
+  st_make_valid() %>%
+  st_buffer(5e4)
+
+grid <- roi %>%
+  st_make_grid(n = c(15, 15), what = "polygons") %>%
+  st_sf()
+
+grid_clip <- st_intersection(grid, roi)
+
+tmp <- dt %>%
+  filter(!is.na(rho_biomass)) %>%
+  filter(commonname == "snabeluer") %>%
+  filter(length_group %in% length_groups) %>%
+  droplevels() %>%
+  group_by(
+    cruiseseries,
+    startyear,
+    cruise,
+    callsignal,
+    serialnumber,
+    longitudestart,
+    latitudestart,
+    bottomdepthstart,
+    length_group
+  ) %>%
+  summarise(value = sum(rho_biomass)) %>%
+  st_as_sf(coords = c("longitudestart", "latitudestart"), crs = 4326) %>%
+  sf::st_transform(attributes(bm)$crs) %>%
+  add_column(grid = as.integer(st_intersects(., grid_clip))) %>%
+  group_by(grid, length_group) %>%
+  reframe(value = mean(value)) %>%
+  group_by(grid) %>%
+  mutate(total = sum(value)) %>%
+  left_join(
+    grid_clip %>%
+      st_centroid() %>%
+      st_coordinates() %>%
+      as_tibble() %>%
+      add_column(grid = 1:nrow(.), .before = 1)
+  ) %>%
+  ungroup() %>%
+  mutate(scal = sqrt(total / max(.$total)) * 4e4 + 3e4) %>%
+  group_by(grid, X, Y, total, scal)
+
+df.grobs <- tmp %>%
+  filter(total > 0) %>%
+  do(
+    subplots = ggplot(., aes(x = 1, y = value, fill = length_group)) +
+      geom_col(
+        position = "fill",
+        alpha = 0.75,
+        colour = "white",
+        linewidth = LS(0.5)
+      ) +
+      coord_polar(theta = "y") +
+      scale_fill_viridis_d(drop = FALSE) +
+      theme_void() +
+      guides(fill = "none")
+  ) %>%
+  mutate(
+    subgrobs = list(annotation_custom(
+      ggplotGrob(subplots),
+      xmin = (X - scal),
+      ymin = (Y - scal),
+      xmax = (X + scal),
+      ymax = (Y + scal)
+    ))
+  )
+
+
+bm + df.grobs$subgrobs
+```
+
+```{r fig-size-map-vanlig, fig.cap = "Spatial distribution of golden redfish size classes across all years and surveys measured using average biomass density. Size of the pie charts refers to the average total biomass density.", fig.height=10}
+
+length_groups <- dt %>%
+  filter(commonname == "vanlig uer", rho_biomass > 0) %>%
+  droplevels() %>%
+  pull(length_group) %>%
+  levels()
+
+by <- "length_group"
+base_size <- 10
+legend_lab <- "Size class"
+
+bm <- basemap(
+  stn,
+  bathy.style = "rcg",
+  legends = FALSE,
+  base_size = base_size
+) +
+  ggnewscale::new_scale_fill() +
+  geom_col(
+    data = data.frame(z = factor(length_groups, length_groups), x = 1, y = 1),
+    aes(x = x, y = y, fill = z)
+  ) +
+  labs(xlab = NULL, ylab = NULL, fill = legend_lab) +
+  scale_fill_viridis_d() +
+  theme(
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    plot.title = element_text(hjust = 0.5, size = base_size),
+    plot.margin = unit(c(0.2, 0, 0.2, 0), "cm")
+  )
+
+roi <- stn %>%
+  st_as_sf(coords = c("longitudestart", "latitudestart"), crs = 4326) %>%
+  sf::st_transform(attributes(bm)$crs) %>%
+  summarise(geometry = st_combine(geometry)) %>%
+  concaveman::concaveman(concavity = 3) %>%
+  st_make_valid() %>%
+  st_buffer(5e4)
+
+grid <- roi %>%
+  st_make_grid(n = c(15, 15), what = "polygons") %>%
+  st_sf()
+
+grid_clip <- st_intersection(grid, roi)
+
+tmp <- dt %>%
+  filter(!is.na(rho_biomass)) %>%
+  filter(commonname == "vanlig uer") %>%
+  filter(length_group %in% length_groups) %>%
+  droplevels() %>%
+  group_by(
+    cruiseseries,
+    startyear,
+    cruise,
+    callsignal,
+    serialnumber,
+    longitudestart,
+    latitudestart,
+    bottomdepthstart,
+    length_group
+  ) %>%
+  summarise(value = sum(rho_biomass)) %>%
+  st_as_sf(coords = c("longitudestart", "latitudestart"), crs = 4326) %>%
+  sf::st_transform(attributes(bm)$crs) %>%
+  add_column(grid = as.integer(st_intersects(., grid_clip))) %>%
+  group_by(grid, length_group) %>%
+  reframe(value = mean(value)) %>%
+  group_by(grid) %>%
+  mutate(total = sum(value)) %>%
+  left_join(
+    grid_clip %>%
+      st_centroid() %>%
+      st_coordinates() %>%
+      as_tibble() %>%
+      add_column(grid = 1:nrow(.), .before = 1)
+  ) %>%
+  ungroup() %>%
+  mutate(scal = sqrt(total / max(.$total)) * 4e4 + 3e4) %>%
+  group_by(grid, X, Y, total, scal)
+
+df.grobs <- tmp %>%
+  filter(total > 0) %>%
+  do(
+    subplots = ggplot(., aes(x = 1, y = value, fill = length_group)) +
+      geom_col(
+        position = "fill",
+        alpha = 0.75,
+        colour = "white",
+        linewidth = LS(0.5)
+      ) +
+      coord_polar(theta = "y") +
+      scale_fill_viridis_d(drop = FALSE) +
+      theme_void() +
+      guides(fill = "none")
+  ) %>%
+  mutate(
+    subgrobs = list(annotation_custom(
+      ggplotGrob(subplots),
+      xmin = (X - scal),
+      ymin = (Y - scal),
+      xmax = (X + scal),
+      ymax = (Y + scal)
+    ))
+  )
+
+
+bm + df.grobs$subgrobs
+```
+
+## Annual averages
+
+```{r, fig-year-dist-snabel, fig.cap = "Swept area density of beaked redfish in each trawl haul (grey dots) by year allocated to length groups. Crossbars indicate mean values and 95% confidence intervals. Blue cross bars are for all data, red for only positive data. The y-axis is log + 1 transformed.", fig.height=8}
+
+target_sp <- "snabeluer"
+length_groups <- dt %>%
+  filter(commonname == target_sp, value > 0) %>%
+  group_by(length_group) %>%
+  count() %>%
+  filter(n > 10) %>%
+  pull(length_group) %>%
+  droplevels() %>%
+  levels()
+
+dt %>%
+  filter(commonname == target_sp) %>%
+  filter(length_group %in% length_groups) %>%
+  droplevels() %>%
+  mutate(year = startyear) %>%
+  ggplot(aes(x = year, y = value)) +
+  geom_jitter(color = "grey", size = 0.3) +
+  stat_summary(
+    fun.data = mean_cl_normal,
+    geom = "crossbar",
+    width = .5,
+    color = "blue"
+  ) +
+  stat_summary(
+    data = dt %>%
+      filter(commonname == target_sp) %>%
+      filter(length_group %in% length_groups) %>%
+      droplevels() %>%
+      mutate(year = startyear) %>%
+      filter(value > 0),
+    fun.data = mean_cl_normal,
+    geom = "crossbar",
+    width = .5,
+    color = "red"
+  ) +
+  labs(x = "Year", y = value_name) +
+  facet_wrap(~length_group) +
+  coord_cartesian(ylim = c(0, 1e5)) +
+  scale_x_continuous(
+    breaks = seq(1980, 2030, 2),
+    labels = substr(seq(1980, 2030, 2), 3, 4),
+    expand = c(0.01, 0)
+  ) +
+  scale_y_continuous(
+    trans = "log1p",
+    breaks = c(0, 1, 10, 100, 1e3, 5e3, 1e4, 2.5e4, 5e4, 1e5, 1.5e5),
+    expand = c(0.01, 0)
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    legend.position = "none"
+  )
+```
+
+```{r, fig-year-dist-vanlig, fig.cap = "Swept area density of golden redfish in each trawl haul (grey dots) by year allocated to length groups. Crossbars indicate mean values and 95% confidence intervals. Blue cross bars are for all data, red for only positive data. The y-axis is log + 1 transformed.", fig.height=8}
+
+target_sp <- "vanlig uer"
+length_groups <- dt %>%
+  filter(commonname == target_sp, value > 0) %>%
+  group_by(length_group) %>%
+  count() %>%
+  filter(n > 10) %>%
+  pull(length_group) %>%
+  droplevels() %>%
+  levels()
+
+dt %>%
+  filter(commonname == target_sp) %>%
+  filter(length_group %in% length_groups) %>%
+  droplevels() %>%
+  mutate(year = startyear) %>%
+  ggplot(aes(x = year, y = value)) +
+  geom_jitter(color = "grey", size = 0.3) +
+  stat_summary(
+    fun.data = mean_cl_normal,
+    geom = "crossbar",
+    width = .5,
+    color = "blue"
+  ) +
+  stat_summary(
+    data = dt %>%
+      filter(commonname == target_sp) %>%
+      filter(length_group %in% length_groups) %>%
+      droplevels() %>%
+      mutate(year = startyear) %>%
+      filter(value > 0),
+    fun.data = mean_cl_normal,
+    geom = "crossbar",
+    width = .5,
+    color = "red"
+  ) +
+  labs(x = "Year", y = value_name) +
+  facet_wrap(~length_group) +
+  coord_cartesian(ylim = c(0, 5e4)) +
+  scale_x_continuous(
+    breaks = seq(1980, 2030, 2),
+    labels = substr(seq(1980, 2030, 2), 3, 4),
+    expand = c(0.01, 0)
+  ) +
+  scale_y_continuous(
+    trans = "log1p",
+    breaks = c(0, 1, 10, 100, 1e3, 5e3, 1e4, 2.5e4, 5e4, 1e5, 1.5e5),
+    expand = c(0.01, 0)
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    legend.position = "none"
+  )
+```
+
+## Depth dependency
+
+```{r fig-depth-lb-snabel, fig.cap = "Bottom depth related to swept area density of beaked redfish in each trawl haul (grey dots) allocated to length groups. The blue line and shading represents loess smoother and standard error for all data and the red line for positive values only. The y-axis is log + 1 transformed."}
+
+target_sp <- "snabeluer"
+length_groups <- dt %>%
+  filter(commonname == target_sp, value > 0) %>%
+  group_by(length_group) %>%
+  count() %>%
+  filter(n > 10) %>%
+  pull(length_group) %>%
+  droplevels() %>%
+  levels()
+
+dt %>%
+  filter(commonname == target_sp) %>%
+  filter(length_group %in% length_groups) %>%
+  droplevels() %>%
+  mutate(depth = bottomdepthstart) %>%
+  ggplot(aes(x = depth, y = value)) +
+  geom_point(color = "grey", size = 0.3) +
+  geom_smooth(fill = "blue") +
+  geom_smooth(
+    data = dt %>%
+      filter(commonname == target_sp) %>%
+      filter(length_group %in% length_groups) %>%
+      droplevels() %>%
+      mutate(depth = bottomdepthstart) %>%
+      filter(value > 0),
+    fill = "red",
+    color = "red"
+  ) +
+  facet_wrap(~length_group) +
+  coord_cartesian(ylim = c(0, NA)) +
+  labs(x = "Bottom depth (m)", y = value_name) +
+  scale_y_continuous(
+    trans = "log1p",
+    breaks = c(0, 1, 10, 100, 1e3, 5e3, 1e4, 2.5e4, 5e4, 1e5, 5e5, 1e6, 3e6),
+    expand = c(0.01, 0)
+  ) +
+  theme_bw(base_size = 8) +
+  scale_x_continuous(breaks = seq(0, 2000, 200), expand = c(0.01, 0))
+```
+
+```{r fig-depth-lb-vanlig, fig.cap = "Bottom depth related to swept area density of golden redfish in each trawl haul (grey dots) allocated to length groups. The blue line and shading represents loess smoother and standard error for all data and the red line for positive values only. The y-axis is log + 1 transformed."}
+
+target_sp <- "vanlig uer"
+length_groups <- dt %>%
+  filter(commonname == target_sp, value > 0) %>%
+  group_by(length_group) %>%
+  count() %>%
+  filter(n > 10) %>%
+  pull(length_group) %>%
+  droplevels() %>%
+  levels()
+
+dt %>%
+  filter(commonname == target_sp) %>%
+  filter(length_group %in% length_groups) %>%
+  droplevels() %>%
+  mutate(depth = bottomdepthstart) %>%
+  ggplot(aes(x = depth, y = value)) +
+  geom_point(color = "grey", size = 0.3) +
+  geom_smooth(fill = "blue") +
+  geom_smooth(
+    data = dt %>%
+      filter(commonname == target_sp) %>%
+      filter(length_group %in% length_groups) %>%
+      droplevels() %>%
+      mutate(depth = bottomdepthstart) %>%
+      filter(value > 0),
+    fill = "red",
+    color = "red"
+  ) +
+  facet_wrap(~length_group) +
+  coord_cartesian(ylim = c(0, NA)) +
+  labs(x = "Bottom depth (m)", y = value_name) +
+  scale_y_continuous(
+    trans = "log1p",
+    breaks = c(0, 1, 10, 100, 1e3, 5e3, 1e4, 2.5e4, 5e4, 1e5, 5e5, 1e6, 3e6),
+    expand = c(0.01, 0)
+  ) +
+  theme_bw(base_size = 8) +
+  scale_x_continuous(breaks = seq(0, 2000, 200), expand = c(0.01, 0))
+```
+
+## Gear dependency
+
+```{r fig-lb-gear-snabel, fig.cap="Swept area density of beaked redfish in each trawl haul (grey dots) by year allocated to length groups and gear type. Crossbars indicate mean values and 95% confidence intervals. The y-axis is log + 1 transformed."}
+
+target_sp <- "snabeluer"
+length_groups <- dt %>%
+  filter(commonname == target_sp, value > 0) %>%
+  group_by(length_group) %>%
+  count() %>%
+  filter(n > 10) %>%
+  pull(length_group) %>%
+  droplevels() %>%
+  levels()
+
+dt %>%
+  filter(commonname == target_sp) %>%
+  filter(length_group %in% length_groups) %>%
+  droplevels() %>%
+  mutate(year = startyear) %>%
+  ggplot(aes(x = year, y = value)) +
+  stat_summary(
+    aes(color = geartype),
+    fun.data = mean_cl_normal,
+    geom = "crossbar",
+    width = .5
+  ) +
+  labs(x = "Year", y = value_name, color = "Gear type") +
+  facet_wrap(~length_group, scales = "free_y") +
+  scale_x_continuous(
+    breaks = seq(1980, 2030, 2),
+    labels = substr(seq(1980, 2030, 2), 3, 4),
+    expand = c(0.01, 0)
+  ) +
+  scale_y_continuous(
+    trans = "log1p",
+    breaks = c(0, 1, 10, 100, 1e3, 5e3, 1e4, 2.5e4, 5e4, 1e5, 1.5e5),
+    expand = c(0.01, 0)
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    legend.position = "bottom"
+  )
+```
+
+```{r fig-lb-gear-vanlig, fig.cap="Swept area density of golden redfish in each trawl haul (grey dots) by year allocated to length groups and gear type. Crossbars indicate mean values and 95% confidence intervals. The y-axis is log + 1 transformed."}
+
+target_sp <- "vanlig uer"
+length_groups <- dt %>%
+  filter(commonname == target_sp, value > 0) %>%
+  group_by(length_group) %>%
+  count() %>%
+  filter(n > 10) %>%
+  pull(length_group) %>%
+  droplevels() %>%
+  levels()
+
+dt %>%
+  filter(commonname == target_sp) %>%
+  filter(length_group %in% length_groups) %>%
+  droplevels() %>%
+  mutate(year = startyear) %>%
+  ggplot(aes(x = year, y = value)) +
+  stat_summary(
+    aes(color = geartype),
+    fun.data = mean_cl_normal,
+    geom = "crossbar",
+    width = .5
+  ) +
+  labs(x = "Year", y = value_name, color = "Gear type") +
+  facet_wrap(~length_group, scales = "free_y") +
+  coord_cartesian(ylim = c(0, 10)) +
+  scale_x_continuous(
+    breaks = seq(1980, 2030, 2),
+    labels = substr(seq(1980, 2030, 2), 3, 4),
+    expand = c(0.01, 0)
+  ) +
+  scale_y_continuous(
+    trans = "log1p",
+    breaks = c(0, 1, 2, 5, 10, 100, 1e3, 5e3, 1e4, 2.5e4, 5e4, 1e5, 1.5e5),
+    expand = c(0.01, 0)
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    legend.position = "bottom"
+  )
+```
+
+## Season dependency
+
+```{r fig-lb-month-snabel, fig.cap="Swept area density of beaked redfish in each trawl haul (grey dots) by month allocated to length groups. Crossbars indicate mean values and 95% confidence intervals. Blue cross bars are for all data, red for only positive data. The y-axis is log + 1 transformed.", fig.height=8}
+
+target_sp <- "snabeluer"
+length_groups <- dt %>%
+  filter(commonname == target_sp, value > 0) %>%
+  group_by(length_group) %>%
+  count() %>%
+  filter(n > 10) %>%
+  pull(length_group) %>%
+  droplevels() %>%
+  levels()
+
+dt %>%
+  filter(commonname == target_sp) %>%
+  filter(length_group %in% length_groups) %>%
+  droplevels() %>%
+  ggplot(aes(x = month, y = value)) +
+  geom_jitter(color = "grey", size = 0.3) +
+  stat_summary(
+    fun.data = mean_cl_normal,
+    geom = "crossbar",
+    width = .5,
+    color = "blue"
+  ) +
+  stat_summary(
+    data = dt %>%
+      filter(commonname == target_sp) %>%
+      filter(length_group %in% length_groups) %>%
+      droplevels() %>%
+      filter(value > 0),
+    fun.data = mean_cl_normal,
+    geom = "crossbar",
+    width = .5,
+    color = "red"
+  ) +
+  labs(x = "Month", y = value_name) +
+  facet_wrap(~length_group) +
+  coord_cartesian(ylim = c(0, 1e5)) +
+  scale_x_continuous(breaks = 1:12, labels = month.abb) +
+  # scale_x_date("Month", date_labels = "%b", date_breaks = "1 months") +
+  scale_y_continuous(
+    trans = "log1p",
+    breaks = c(0, 1, 10, 100, 1e3, 5e3, 1e4, 2.5e4, 5e4, 1e5, 1.5e5),
+    expand = c(0.01, 0)
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    legend.position = "none"
+  )
+```
+
+```{r fig-lb-month-vanlig, fig.cap="Swept area density of golden redfish in each trawl haul (grey dots) by month allocated to length groups. Crossbars indicate mean values and 95% confidence intervals. Blue cross bars are for all data, red for only positive data. The y-axis is log + 1 transformed.", fig.height=8}
+
+target_sp <- "vanlig uer"
+length_groups <- dt %>%
+  filter(commonname == target_sp, value > 0) %>%
+  group_by(length_group) %>%
+  count() %>%
+  filter(n > 10) %>%
+  pull(length_group) %>%
+  droplevels() %>%
+  levels()
+
+dt %>%
+  filter(commonname == target_sp) %>%
+  filter(length_group %in% length_groups) %>%
+  droplevels() %>%
+  ggplot(aes(x = month, y = value)) +
+  geom_jitter(color = "grey", size = 0.3) +
+  stat_summary(
+    fun.data = mean_cl_normal,
+    geom = "crossbar",
+    width = .5,
+    color = "blue"
+  ) +
+  stat_summary(
+    data = dt %>%
+      filter(commonname == target_sp) %>%
+      filter(length_group %in% length_groups) %>%
+      droplevels() %>%
+      filter(value > 0),
+    fun.data = mean_cl_normal,
+    geom = "crossbar",
+    width = .5,
+    color = "red"
+  ) +
+  labs(x = "Month", y = value_name) +
+  facet_wrap(~length_group) +
+  coord_cartesian(ylim = c(0, 5e4)) +
+  scale_x_continuous(breaks = 1:12, labels = month.abb) +
+  # scale_x_date("Month", date_labels = "%b", date_breaks = "1 months") +
+  scale_y_continuous(
+    trans = "log1p",
+    breaks = c(0, 1, 10, 100, 1e3, 5e3, 1e4, 2.5e4, 5e4, 1e5, 1.5e5),
+    expand = c(0.01, 0)
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    legend.position = "none"
+  )
+```
+
+```{r fig-lb-season-gear-snabel, fig.cap = "Swept area density of beaked redfish in each trawl haul (grey dots) by season (the half of the year) allocated to gear type and length groups. Crossbars indicate mean values and 95% confidence intervals. Blue cross bars are for all data, red for only positive data. The y-axis is log + 1 transformed.", fig.height=8}
+
+target_sp <- "snabeluer"
+length_groups <- dt %>%
+  filter(commonname == target_sp, value > 0) %>%
+  group_by(length_group) %>%
+  count() %>%
+  filter(n > 10) %>%
+  pull(length_group) %>%
+  droplevels() %>%
+  levels()
+
+dt %>%
+  filter(commonname == target_sp) %>%
+  filter(length_group %in% length_groups) %>%
+  droplevels() %>%
+  # mutate(value = rho_biomass) %>%
+  ggplot(aes(x = season, y = value)) +
+  geom_jitter(color = "grey", size = 0.3) +
+  stat_summary(
+    fun.data = mean_cl_normal,
+    geom = "crossbar",
+    width = .5,
+    color = "blue"
+  ) +
+  stat_summary(
+    data = dt %>%
+      filter(commonname == target_sp) %>%
+      filter(length_group %in% length_groups) %>%
+      droplevels() %>%
+      # mutate(value = rho_biomass) %>%
+      filter(value > 0),
+    fun.data = mean_cl_normal,
+    geom = "crossbar",
+    width = .5,
+    color = "red"
+  ) +
+  labs(x = "Half of the year", y = value_name) +
+  facet_grid(geartype ~ length_group, scales = "free_y") +
+  scale_y_continuous(
+    trans = "log1p",
+    breaks = c(0, 1, 10, 100, 1e3, 5e3, 1e4, 2.5e4, 5e4, 1e5, 1.5e5),
+    expand = c(0.01, 0)
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    legend.position = "none"
+  )
+```
+
+```{r fig-lb-season-gear-vanlig, fig.cap = "Swept area density of golden redfish in each trawl haul (grey dots) by season (the half of the year) allocated to gear type and length groups. Crossbars indicate mean values and 95% confidence intervals. Blue cross bars are for all data, red for only positive data. The y-axis is log + 1 transformed.", fig.height=8}
+
+target_sp <- "vanlig uer"
+length_groups <- dt %>%
+  filter(commonname == target_sp, value > 0) %>%
+  group_by(length_group) %>%
+  count() %>%
+  filter(n > 10) %>%
+  pull(length_group) %>%
+  droplevels() %>%
+  levels()
+
+dt %>%
+  filter(commonname == target_sp) %>%
+  filter(length_group %in% length_groups) %>%
+  droplevels() %>%
+  # mutate(value = rho_biomass) %>%
+  ggplot(aes(x = season, y = value)) +
+  geom_jitter(color = "grey", size = 0.3) +
+  stat_summary(
+    fun.data = mean_cl_normal,
+    geom = "crossbar",
+    width = .5,
+    color = "blue"
+  ) +
+  stat_summary(
+    data = dt %>%
+      filter(commonname == target_sp) %>%
+      filter(length_group %in% length_groups) %>%
+      droplevels() %>%
+      # mutate(value = rho_biomass) %>%
+      filter(value > 0),
+    fun.data = mean_cl_normal,
+    geom = "crossbar",
+    width = .5,
+    color = "red"
+  ) +
+  labs(x = "Half of the year", y = value_name) +
+  facet_grid(geartype ~ length_group, scales = "free_y") +
+  scale_y_continuous(
+    trans = "log1p",
+    breaks = c(0, 1, 10, 100, 1e3, 5e3, 1e4, 2.5e4, 5e4, 1e5, 1.5e5),
+    expand = c(0.01, 0)
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    legend.position = "none"
+  )
+```
+
+## Length group maps
+
+```{r fig-lg-map-snabel, fig.cap = "Spatial distribution of beaked redfish length groups according to the length-based dataset with all years combined. Abundance density is represented by circle color and size.", fig.height=8}
+
+target_sp <- "snabeluer"
+length_groups <- dt %>%
+  filter(commonname == target_sp, value > 0) %>%
+  group_by(length_group) %>%
+  count() %>%
+  filter(n > 10) %>%
+  pull(length_group) %>%
+  droplevels() %>%
+  levels()
+
+dt %>%
+  filter(commonname == target_sp) %>%
+  filter(length_group %in% length_groups) %>%
+  droplevels() %>%
+  bubble_map(label = value_name, by_year = FALSE) +
+  facet_wrap(~length_group, ncol = 4)
+```
+
+```{r fig-lg-map-vanlig, fig.cap = "Spatial distribution of golden redfish length groups according to the length-based dataset with all years combined. Abundance density is represented by circle color and size.", fig.height=8}
+
+target_sp <- "vanlig uer"
+length_groups <- dt %>%
+  filter(commonname == target_sp, value > 0) %>%
+  group_by(length_group) %>%
+  count() %>%
+  filter(n > 10) %>%
+  pull(length_group) %>%
+  droplevels() %>%
+  levels()
+
+dt %>%
+  filter(commonname == target_sp) %>%
+  filter(length_group %in% length_groups) %>%
+  # filter(!is.na(rho_biomass)) %>%
+  droplevels() %>%
+  # mutate(value = rho_biomass) %>%
+  bubble_map(label = value_name, by_year = FALSE) +
+  facet_wrap(~length_group, ncol = 4)
+```
+
+# References

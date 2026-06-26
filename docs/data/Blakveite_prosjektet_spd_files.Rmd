@@ -1,0 +1,2408 @@
+---
+title: "IMR data overview for compiled redfish survey index work"
+subtitle: "Blåkveiteprosjektet 2003-2006, 2008"
+author: |
+date: "Version: `r format(Sys.time(), '%d %B, %Y')`"
+output:
+  bookdown::html_document2:
+    toc: true
+    theme: lumen
+    toc_float: true
+    toc_depth: 3
+    collapsed: true
+    variant: markdown+simple_table
+    fig_caption: true
+    number_sections: true
+    code_folding: hide
+header-includes:
+ \usepackage{float}
+ \floatplacement{figure}{H}
+ \usepackage[T1]{fontenc}
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  fig.pos = "H",
+  fig.width = 9,
+  fig.height = 5,
+  tab.pos = "H",
+  collapse = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  comment = "#>"
+)
+
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+
+options(knitr.kable.NA = "")
+```
+
+This document contains the scripts and overview of data extracted from old IMR spd files covering Blåkveiteprosjektet conducted in 2003-2006 and 2008.
+
+# Data export
+
+Use this switch to update data. Data update will only work when connected to the `ces` server:
+
+```{r, class.source = 'fold-show'}
+update_data <- TRUE
+filter_sp <- c("snabeluer", "vanlig uer")
+sp_name <- "redfish"
+Sp_name <- "Redfish"
+```
+
+Load required packages:
+
+```{r}
+## Load packages
+
+packages <- c("sf", "tidyverse", "ggOceanMaps", "ggspatial")
+
+# Install packages not yet installed
+# installed_packages <- packages %in% rownames(installed.packages())
+# if (any(installed_packages == FALSE)) {
+#   install.packages(packages[!installed_packages])
+# }
+
+# Packages loading
+invisible(lapply(packages, library, character.only = TRUE))
+
+rm(packages)
+
+## ---------------------------
+
+## ggplot theme
+
+theme_cust <- theme_classic(base_size = 8) %+replace%
+  theme(
+    strip.background = element_blank(),
+    panel.background = element_blank(),
+    plot.background = element_blank(),
+    legend.background = element_blank(),
+    legend.box.background = element_blank(),
+    plot.margin = margin(c(5.5, 10, 5.5, 5.5))
+  )
+
+theme_set(theme_cust) # Set default theme globally for the entire project
+
+## Custom functions
+
+source("R/legacy/make_table.R")
+source("R/legacy/bubble_map.R")
+source("R/legacy/read_spd_1_6.R")
+
+## Flatten list of ggplots
+## https://stackoverflow.com/questions/55731855/how-to-extract-every-ggplot2-plot-from-a-nested-list
+
+flattenlist <- function(x) {
+  morelists <- sapply(x, function(xprime) {
+    'list' %in% class(xprime) & !('gg' %in% class(xprime))
+  })
+  out <- c(x[!morelists], unlist(x[morelists], recursive = FALSE))
+  if (sum(morelists)) {
+    Recall(out)
+  } else {
+    return(out)
+  }
+}
+```
+
+## Download and process the data from servers
+
+Works only when connected to `ces`:
+
+```{r}
+if (update_data) {
+  # remove FALSE when updating data from the server.
+
+  path <- "/Volumes/felles/Dyphavsarter/Tokt/gamle toktserier og spdfiler/blåkveiteprosjektet 2003-2008/spd/spd ikke i biotic pr des 2023/"
+
+  files <- dir(path, full.names = TRUE)
+
+  if (length(files) == 0) {
+    warning(
+      "No connection to the server. Reading the local file without updating it."
+    )
+    y <- read_rds('data/survey data/Blaakveite_prosjektet_data.rds')
+  } else {
+    y <- lapply(seq_along(files), function(i) {
+      # message(i)
+      fn <- unlist(strsplit(files[i], "/"))
+      fn <- fn[length(fn)]
+
+      out <- read_spd(files[i])
+
+      if (!is.null(out$stnall)) {
+        out$stnall <-
+          out$stnall %>%
+          add_column(cruise = fn, .after = "callsignal")
+      }
+
+      if (!is.null(out$indall)) {
+        out$indall <-
+          out$indall %>%
+          add_column(cruise = fn, .after = "callsignal")
+      }
+
+      if (!is.null(out$ldist)) {
+        out$ldist <-
+          out$ldist %>%
+          add_column(cruise = fn, .after = "callsignal")
+      }
+
+      out
+    })
+
+    names(y) <- dir(path)
+
+    write_rds(
+      y,
+      'data/survey data/Blaakveite_prosjektet_data.rds',
+      compress = "xz"
+    )
+  }
+} else {
+  y <- read_rds('data/survey data/Blaakveite_prosjektet_data.rds')
+}
+```
+
+# Station level data
+
+The script under calculates abundance and biomass swept area density assuming 25 m effective width for shrimp trawls (Campelen) and `r round(25*3.746)` m width for cod trawls (Alfredo). This trawl width comes from Greenland halibut work and needs to be adjusted for `r sp_name`.
+
+
+```{r}
+if (update_data) {
+  stn <-
+    lapply(y, function(k) k$stnall) %>%
+    bind_rows() %>%
+    filter(
+      gearcategory == "Bottom trawls",
+      !is.na(distance),
+      !is.na(latitudestart),
+      !is.na(longitudestart)
+    ) %>%
+    select(where(~ !all(is.na(.x)))) %>%
+    filter(
+      gearcondition %in% 1:2,
+      samplequality %in% 1,
+      !stationtype %in% c("C", "2", "A", "E"),
+      # distance <= 5,
+      distance >= 0.3,
+      latitudestart > 50,
+      longitudestart > 0
+    ) %>%
+    mutate(id = paste(cruise, startyear, callsignal, serialnumber, sep = "_"))
+
+  # Remove stations with unclarities in catchcount / weight
+
+  tmp <- stn %>%
+    filter(commonname %in% filter_sp) %>%
+    group_by(id) %>%
+    reframe(
+      catchweight = sum(catchweight, na.rm = TRUE),
+      catchcount = sum(catchcount, na.rm = TRUE),
+      lengthsampleweight = sum(lengthsampleweight, na.rm = TRUE),
+      lengthsamplecount = sum(lengthsamplecount, na.rm = TRUE)
+    ) %>%
+    filter(
+      catchcount < lengthsamplecount | catchweight < lengthsampleweight
+    ) %>%
+    pull(id)
+
+  stn <- stn %>%
+    filter(!id %in% tmp)
+
+  # Remove stations outside the study area
+
+  # roi <- sf::read_sf("data/in/gis/study area.gpkg")
+  #
+  # tmp <- stn %>%
+  #   sf::st_as_sf(
+  #     coords = c("longitudestart", "latitudestart"),
+  #     crs = 4326
+  #   ) %>%
+  #   sf::st_intersects(roi) %>%
+  #   as.integer() %>%
+  #   is.na() %>% `!`
+  #
+  # stn <- stn[tmp,]
+
+  ## General manipulation ###
+
+  stn$commonname[!stn$commonname %in% filter_sp] <- "other"
+
+  stn <- stn %>%
+    group_by(
+      startyear,
+      callsignal,
+      cruise,
+      stationstartdate,
+      stationstopdate,
+      bottomdepthstart,
+      gear,
+      gearname,
+      trawldoorspread,
+      verticaltrawlopening,
+      wirelength,
+      vesselspeed,
+      serialnumber,
+      longitudestart,
+      latitudestart,
+      distance,
+      commonname
+    ) %>%
+    reframe(
+      biomass = sum(catchweight, na.rm = TRUE),
+      count = sum(catchcount, na.rm = TRUE)
+    ) %>%
+    mutate(commonname = factor(commonname)) %>%
+    group_by(
+      startyear,
+      callsignal,
+      cruise,
+      stationstartdate,
+      stationstopdate,
+      bottomdepthstart,
+      gear,
+      gearname,
+      trawldoorspread,
+      verticaltrawlopening,
+      wirelength,
+      vesselspeed,
+      serialnumber,
+      longitudestart,
+      latitudestart,
+      distance
+    ) %>%
+    complete(
+      commonname,
+      fill = list(biomass = 0, count = 0),
+      explicit = FALSE
+    ) %>%
+    filter(commonname != "other")
+
+  ## Replace 0 counts with positive biomasses by NAs
+
+  if (any(stn$biomass == 0 & stn$count != 0)) {
+    stn[stn$biomass == 0 & stn$count != 0, ]$biomass <- NA
+  }
+
+  if (any(stn$biomass != 0 & stn$count == 0)) {
+    stn[stn$biomass != 0 & stn$count == 0, ]$count <- NA
+  }
+
+  ## Remove unreasonably large count values from the dataset
+
+  tmp <- stn$biomass / stn$count
+
+  if (min(tmp, na.rm = TRUE) < 0.001) {
+    # stop("Smallest average individual weights less than a gram. Something wrong with the count column?")
+    message(
+      sum(tmp < 0.001, na.rm = TRUE),
+      " stations removed because average individual weight for each was less than a gram."
+    )
+
+    stn[tmp < 0.001 & !is.na(tmp), ]$count <- NA
+  }
+
+  if (max(tmp, na.rm = TRUE) > 10) {
+    # stop("Largest average individual weights over 10 kg. Something wrong with the count column?")
+    message(
+      sum(tmp > 10, na.rm = TRUE),
+      " stations removed because average individual weight for each was over 10 kg."
+    )
+
+    stn[tmp > 10 & !is.na(tmp), ]$count <- NA
+  }
+
+  # Species
+
+  stn <- droplevels(stn)
+  stn <- stn %>%
+    mutate(commonname = factor(as.character(commonname), levels = filter_sp))
+
+  ## Replace missing start dates with stop dates
+
+  stn[
+    is.na(stn$stationstartdate) & !is.na(stn$stationstopdate),
+    "stationstartdate"
+  ] <-
+    stn[
+      is.na(stn$stationstartdate) & !is.na(stn$stationstopdate),
+      "stationstopdate"
+    ]
+
+  ## Column classes
+
+  num_cols <-
+    sapply(stn, function(k) {
+      all(suppressWarnings(!is.na(as.numeric(k[!is.na(k)])))) &
+        !inherits(k, c("Date", "POSIXct", "factor"))
+    })
+  num_cols["serialnumber"] <- FALSE
+
+  stn[num_cols] <- lapply(stn[num_cols], as.numeric)
+
+  ## Cruise series name
+
+  stn <- stn %>%
+    mutate(cruiseseries = "BlkvProj", .after = startyear)
+
+  ## Trawling duration
+
+  tmp <- difftime(stn$stationstopdate, stn$stationstartdate, units = 'mins')
+  tmp[tmp <= 0 | tmp > 400] <- NA
+  stn$duration <- tmp
+
+  ### Assuming that >5 & <1.2 knot trawling speeds are errors in *duration* registration (distance not changed)
+
+  tmp <- stn$distance / (as.numeric(stn$duration) / 60)
+  stn[tmp > 5 & !is.na(tmp), ]$duration <- NA
+  stn[tmp < 1.2 & !is.na(tmp), ]$duration <- NA
+
+  ## Gears
+  stn <- stn %>%
+    mutate(
+      geartype = if_else(
+        grepl("GOV-", gearname),
+        "GOV",
+        if_else(
+          grepl("^32", gear),
+          "Shrimp",
+          if_else(grepl("^31", gear), "Cod", "Other")
+        )
+      )
+    ) %>%
+    mutate(
+      gear_width = if_else(
+        geartype == "GOV",
+        25,
+        if_else(
+          geartype == "Shrimp",
+          25,
+          if_else(geartype == "Cod", 25 * 3.746, NA)
+        )
+      )
+    ) %>%
+    mutate(
+      rho_biomass = biomass / (distance * (gear_width / 1852)),
+      rho_abundance = count / (distance * (gear_width / 1852))
+    ) %>%
+    mutate(
+      tmp = wirelength / trawldoorspread,
+      trawldoorspread = ifelse(tmp < 2.4 | tmp > 40, NA, trawldoorspread),
+      verticaltrawlopening = ifelse(
+        verticaltrawlopening < 2 | verticaltrawlopening > 7,
+        NA,
+        verticaltrawlopening
+      )
+    ) %>%
+    dplyr::select(-tmp) %>%
+    mutate(duration = if_else(duration > 300, NA, duration))
+
+  ## Remove observations on land
+  # stn <- ggOceanMaps::dist2land(stn, binary = TRUE, dist.col = "in_ocean",
+  #                               bind = TRUE) %>%
+  #   filter(in_ocean) %>%
+  #   dplyr::select(-in_ocean)
+
+  ## Fill in missing depths (and correct too deep stations)
+
+  stn[
+    !is.na(stn$bottomdepthstart) & stn$bottomdepthstart > 1400,
+    "bottomdepthstart"
+  ] <- NA
+
+  if (any(is.na(stn$bottomdepthstart))) {
+    stn[is.na(stn$bottomdepthstart), "bottomdepthstart"] <-
+      ggOceanMaps::get_depth(
+        stn[is.na(stn$bottomdepthstart), ],
+        bathy.style = "ru",
+        bind = FALSE
+      )
+  }
+
+  stn <- stn %>% filter(!is.na(bottomdepthstart))
+
+  if (any(stn$bottomdepthstart == 0)) {
+    stn[stn$bottomdepthstart == 0, "bottomdepthstart"] <-
+      ggOceanMaps::get_depth(
+        stn[stn$bottomdepthstart == 0, ],
+        bathy.style = "ru",
+        bind = FALSE
+      )
+  }
+
+  gearList <- read_rds('data/definitions/imr_gearlist.rds')
+  # gearList %>%
+  # dplyr::select(-gearcategory) %>%
+  # dplyr::rename("gear" = "code")
+
+  stn <- ungroup(stn)
+
+  ### Save ####
+
+  write_rds(
+    stn,
+    'data/survey data/stn_Blakveite_prosjektet.rds',
+    compress = "xz"
+  )
+} else {
+  stn <- read_rds('data/survey data/stn_Blakveite_prosjektet.rds')
+  gearList <- read_rds('data/definitions/imr_gearlist.rds')
+}
+```
+
+## Station overview
+
+The dataset contained `r stn %>% distinct(startyear, callsignal,serialnumber) %>% nrow()` trawl hauls from `r min(stn$startyear)` to `r max(stn$startyear)`. `r stn %>% filter(commonname == "snabeluer", rho_biomass > 0) %>% distinct(startyear, callsignal,serialnumber) %>% nrow()` of these stations contained beaked redfish and `r stn %>% filter(commonname == "vanlig uer", rho_biomass > 0) %>% distinct(startyear, callsignal,serialnumber) %>% nrow()` golden redfish.
+
+```{r, fig.cap = paste("Overview of station positions over all years. Purple crosses indicate stations with no", sp_name, "occurrences."), fig.height=9}
+p <-
+  basemap(stn, bathy.style = "rbg", legends = FALSE) +
+  geom_spatial_point(
+    data = stn %>% filter(rho_biomass == 0 & !is.na(rho_biomass)),
+    aes(x = longitudestart, y = latitudestart),
+    color = "purple",
+    shape = "+",
+    alpha = 0.5
+  ) +
+  geom_spatial_point(
+    data = stn %>% filter(rho_biomass > 0 & !is.na(rho_biomass)),
+    aes(
+      x = longitudestart,
+      y = latitudestart,
+      size = rho_biomass,
+      color = commonname
+    ),
+    shape = 21
+  ) +
+  facet_wrap(~startyear, ncol = 3) +
+  scale_size_area() +
+  labs(
+    color = "Taxa",
+    size = expression(paste("Biomass density (kg ", nmi^-2, ")"))
+  ) +
+  theme(legend.position = "bottom")
+
+p
+```
+
+Thee were close to no data in 2006 and no data in 2007 (Figure \@ref(fig:n-stn)).
+
+```{r n-stn, fig.cap = paste("Number of stations with and without", sp_name, "by year.")}
+stn %>%
+  group_by(geartype, startyear, commonname) %>%
+  reframe(
+    yes = sum(rho_abundance > 0, na.rm = TRUE),
+    no = sum(rho_abundance == 0, na.rm = TRUE)
+  ) %>%
+  pivot_longer(cols = c(yes, no)) %>%
+  mutate(name = factor(name, c("no", "yes"))) %>%
+  ggplot(aes(x = startyear, y = value, fill = name)) +
+  geom_col() +
+  labs(x = "Year", y = "Number of stations", fill = "Contains\ntarget taxa") +
+  facet_wrap(~commonname) +
+  scale_fill_manual(values = c("yes" = "#66a182", "no" = "grey")) +
+  scale_y_continuous(expand = c(0.01, 0)) +
+  scale_x_continuous(
+    breaks = seq(1980, 2030, 2),
+    labels = substr(seq(1980, 2030, 2), 3, 4),
+    expand = c(0.01, 0)
+  ) +
+  theme(legend.position = "bottom")
+```
+
+### Gear
+
+```{r, fig.cap = "Overview of used bottom trawls. Reketrål means Campelen-like shrimp trawls and other names Alfredo-like cod trawls. Number in parenthesis after the name indicates number of occurrences.", fig.height=7}
+ggplot(
+  stn %>%
+    # filter(rho_biomass > 0) %>%
+    left_join(stn %>% group_by(gearname) %>% count) %>%
+    mutate(gearname = paste0(gearname, " (", n, ")")),
+  aes(x = gearname, y = log10(rho_biomass + 1), color = cruise)
+) +
+  geom_boxplot() +
+  theme_bw() +
+  facet_grid(commonname ~ geartype, scales = "free") +
+  labs(color = "Data source") +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)
+  )
+```
+
+```{r}
+colfun <- function(x) {
+  mn <- mean(x, na.rm = TRUE)
+  ifelse(
+    is.na(mn),
+    "",
+    paste(
+      round(mn, 1),
+      "\u00B1",
+      paste(round(range(x, na.rm = TRUE), 1), collapse = "-")
+    )
+  )
+}
+
+stn %>%
+  group_by(gear, startyear) %>%
+  mutate(
+    verticaltrawlopening = ifelse(
+      verticaltrawlopening < 0,
+      NA,
+      verticaltrawlopening
+    )
+  ) %>%
+  summarise(
+    n = n(),
+    `Door spread (m)` = colfun(trawldoorspread),
+    `Trawl opening height (m)` = colfun(verticaltrawlopening),
+    `Trawling speed (kn)` = colfun(vesselspeed),
+    `Tow distance (nmi)` = colfun(distance),
+    `Tow duration (min)` = colfun(duration),
+    `Beaked redfish density (kg/nmi2)` = colfun(rho_biomass[
+      commonname == "snabeluer"
+    ]),
+    `Golden redfish density (kg/nmi2)` = colfun(rho_biomass[
+      commonname == "vanlig uer"
+    ])
+  ) %>%
+  left_join(
+    gearList %>% mutate(gear = as.integer(gear))
+  ) %>%
+  #dplyr::select(-gear) %>%
+  dplyr::relocate(gearname, .after = "startyear") %>%
+  rename(
+    "Year" = "startyear",
+    "Gear name" = "gearname",
+    "Gear code" = "gear",
+    "Description" = "description"
+  ) %>%
+  make_table(caption = "Overview of trawls used in the dataset.")
+```
+
+```{r, fig.cap = "Trawl statistics by data source.", fig.height=8}
+stn %>%
+  distinct(
+    startyear,
+    serialnumber,
+    geartype,
+    duration,
+    distance,
+    cruise,
+    cruiseseries,
+    trawldoorspread,
+    verticaltrawlopening,
+    wirelength,
+    bottomdepthstart
+  ) %>%
+  mutate(duration = as.numeric(duration)) %>%
+  mutate(
+    speed = distance / (duration / 60),
+    wirelengthratio = wirelength / bottomdepthstart
+  ) %>%
+  dplyr::select(
+    cruise,
+    cruiseseries,
+    distance,
+    duration,
+    speed,
+    trawldoorspread,
+    verticaltrawlopening,
+    wirelengthratio
+  ) %>%
+  pivot_longer(
+    cols = c(
+      distance,
+      duration,
+      speed,
+      trawldoorspread,
+      verticaltrawlopening,
+      wirelengthratio
+    ),
+    values_drop_na = TRUE
+  ) %>%
+  mutate(
+    name = recode(
+      name,
+      "distance" = "Trawled distance (nmi)",
+      "duration" = "Trawl duration (min)",
+      "speed" = "Trawl speed (knots)",
+      "trawldoorspread" = "Trawl door spread (m)",
+      "verticaltrawlopening" = "Vertical trawl opening (m)",
+      "wirelengthratio" = "Trawl wire length / bottom depth"
+    )
+  ) %>%
+  ggplot(aes(x = value)) +
+  geom_histogram() +
+  labs(x = "Value", y = "Count") +
+  facet_grid(cruise ~ name, scales = "free") +
+  theme_bw(base_size = 10)
+```
+
+```{r}
+colfun <- function(x) {
+  mn <- mean(x, na.rm = TRUE)
+  ifelse(
+    is.na(mn),
+    "",
+    paste(
+      round(mn, 1),
+      "\u00B1",
+      paste(round(range(x, na.rm = TRUE), 1), collapse = "-")
+    )
+  )
+}
+
+stn %>%
+  mutate(
+    speed = distance / (as.numeric(duration) / 60),
+    verticaltrawlopening = ifelse(
+      verticaltrawlopening < 0,
+      NA,
+      verticaltrawlopening
+    ),
+    wirelengthratio = wirelength / bottomdepthstart
+  ) %>%
+  group_by(startyear, geartype) %>%
+  mutate() %>%
+  summarise(
+    n = n(),
+    `Tow distance (nmi)` = colfun(distance),
+    `Tow duration (min)` = colfun(duration),
+    `Trawling speed (kn)` = colfun(speed),
+    `Door spread (m)` = colfun(trawldoorspread),
+    `Vertical trawl opening (m)` = colfun(verticaltrawlopening),
+    `Wire length / bottom depth` = colfun(wirelengthratio),
+    `Beaked redfish density (kg/nmi2)` = colfun(rho_biomass[
+      commonname == "snabeluer"
+    ]),
+    `Golden redfish density (kg/nmi2)` = colfun(rho_biomass[
+      commonname == "vanlig uer"
+    ])
+  ) %>%
+  rename("Year" = "startyear", "Trawl type" = "geartype") %>%
+  make_table(
+    caption = "Average trawl statistics (mean and range) by year, trawl type and species."
+  )
+```
+
+
+```{r, fig.cap="Trawl statistics by gear type"}
+cowplot::plot_grid(
+  ggplot(
+    stn %>% distinct(startyear, serialnumber, geartype, duration, distance),
+    aes(x = distance, fill = geartype)
+  ) +
+    geom_histogram() +
+    labs(
+      x = "Trawled distance (nmi)",
+      y = "Number of stations",
+      fill = "Survey"
+    ) +
+    # scale_y_continuous(expand = c(0,0)) +
+    ggtitle("Distance") +
+    theme(legend.position = "none"),
+  ggplot(
+    stn %>% distinct(startyear, serialnumber, geartype, duration, distance),
+    aes(x = duration, fill = geartype)
+  ) +
+    geom_histogram() +
+    labs(x = "Trawl duration (min)", y = "Number of stations") +
+    # scale_y_continuous(expand = c(0,0)) +
+    ggtitle("Duration") +
+    theme(legend.position = c(0.8, 0.8)),
+  ggplot(
+    stn %>% distinct(startyear, serialnumber, geartype, duration, distance),
+    aes(x = distance / (as.numeric(duration) / 60))
+  ) +
+    geom_histogram() +
+    labs(x = "Trawl speed (knots; nmi/h)", y = "Number of stations") +
+    # scale_y_continuous(expand = c(0,0)) +
+    ggtitle("Speed"),
+  ggplot(
+    stn %>%
+      distinct(
+        startyear,
+        serialnumber,
+        geartype,
+        duration,
+        distance,
+        trawldoorspread
+      ),
+    aes(x = trawldoorspread, fill = geartype)
+  ) +
+    geom_histogram() +
+    labs(x = "Trawl door spread (m)", y = "Number of stations") +
+    # scale_y_continuous(expand = c(0,0)) +
+    ggtitle("Door spread") +
+    theme(legend.position = "none"),
+  ggplot(
+    stn %>%
+      distinct(
+        startyear,
+        serialnumber,
+        geartype,
+        duration,
+        distance,
+        trawldoorspread,
+        verticaltrawlopening
+      ),
+    aes(x = verticaltrawlopening, fill = geartype)
+  ) +
+    geom_histogram() +
+    labs(x = "Vertical trawl opening (m)", y = "Number of stations") +
+    # scale_y_continuous(expand = c(0,0)) +
+    ggtitle("Vertical trawl opening") +
+    theme(legend.position = "none"),
+  ggplot(
+    stn %>%
+      distinct(
+        startyear,
+        serialnumber,
+        geartype,
+        duration,
+        distance,
+        trawldoorspread,
+        verticaltrawlopening,
+        wirelength,
+        bottomdepthstart
+      ),
+    aes(x = wirelength / bottomdepthstart)
+  ) +
+    geom_histogram() +
+    labs(x = "Trawl wire length / bottom depth", y = "Number of stations") +
+    # scale_y_continuous(expand = c(0,0)) +
+    ggtitle("Wire length ratio"),
+  ncol = 2,
+  byrow = FALSE
+)
+```
+
+### Effort
+
+```{r, fig.cap = "Trawling duration by year and gear type."}
+stn %>%
+  distinct(startyear, serialnumber, geartype, duration) %>%
+  filter(!is.na(duration)) %>%
+  ggplot(aes(x = startyear, y = duration, group = startyear)) +
+  geom_jitter(color = "grey", size = 0.3) +
+  stat_summary(
+    fun.data = mean_cl_normal,
+    geom = "crossbar",
+    width = .5,
+    color = "blue"
+  ) +
+  facet_wrap(~geartype) +
+  coord_cartesian(ylim = c(0, NA)) +
+  labs(x = "Year", y = "Trawl duration (h)") +
+  scale_y_continuous(
+    breaks = c(0, 15, 20, 30, 60, 90, 120, 200, 250),
+    expand = c(0, 0)
+  ) +
+  theme_bw()
+```
+
+```{r, fig.cap = "Trawling distance by year and gear type."}
+stn %>%
+  distinct(startyear, serialnumber, callsignal, geartype, distance) %>%
+  ggplot(aes(x = startyear, y = distance, group = startyear)) +
+  geom_jitter(color = "grey", size = 0.3) +
+  stat_summary(
+    fun.data = mean_cl_normal,
+    geom = "crossbar",
+    width = .5,
+    color = "blue"
+  ) +
+  facet_wrap(~geartype) +
+  coord_cartesian(ylim = c(0, NA)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_x_continuous(
+    breaks = seq(1980, 2030, 4),
+    labels = substr(seq(1980, 2030, 4), 3, 4)
+  ) +
+  labs(x = "Year", y = "Trawl distance (nmi)") +
+  theme_bw()
+```
+
+### Timing
+
+```{r, fig-survey-time, fig.cap = "Overview of survey timing. Spd source files have been separated."}
+
+tmp <- stn %>%
+  filter(!is.na(stationstartdate)) %>%
+  mutate(
+    yday = as.Date(lubridate::yday(stationstartdate) - 1, origin = "2023-01-01")
+  ) %>%
+  group_by(startyear, cruise, cruiseseries, geartype) %>%
+  reframe(min = min(yday), max = max(yday)) %>%
+  mutate(
+    cruise = factor(cruise, unique(.$cruise)),
+    ypos = startyear +
+      as.numeric(cruise) / (nlevels(cruise) * 1.1)
+  )
+
+tmp %>%
+  ggplot(aes(
+    x = min,
+    xend = max,
+    y = ypos,
+    yend = ypos,
+    color = geartype,
+    group = cruise
+  )) +
+  geom_segment(linewidth = 2, alpha = 0.7) +
+  scale_x_date("Month", date_labels = "%b", date_breaks = "1 months") +
+  scale_y_continuous("Year", breaks = seq(1980, 2030, 1), expand = c(0.01, 0)) +
+  coord_cartesian(ylim = c(NA, round_any(max(tmp$ypos), 1, ceiling))) +
+  # scale_color_manual("Survey", values = survey_cols) +
+  theme_bw() +
+  theme(
+    panel.grid.minor.y = element_blank()
+  )
+```
+
+### Response distribution
+
+```{r bm-density-comparison, fig.cap="Biomass density differences among year (a-b) and gear categories (c-d). b and d have zero densities removed."}
+cowplot::plot_grid(
+  ggplot(
+    stn,
+    aes(x = startyear, y = rho_biomass, group = startyear)
+  ) +
+    geom_boxplot() +
+    facet_wrap(~commonname) +
+    scale_y_continuous(
+      trans = "log1p",
+      breaks = c(0, 10, 1e2, 1e3, 1e4, 5e4, 1.5e5)
+    ) +
+    scale_x_continuous(breaks = 1980:2030) +
+    labs(x = "Year", y = expression(paste("Density (kg ", nmi^-2, ")"))),
+
+  ggplot(
+    stn %>%
+      filter(rho_biomass > 0),
+    aes(x = startyear, y = rho_biomass, group = startyear)
+  ) +
+    geom_boxplot() +
+    facet_wrap(~commonname) +
+    scale_y_continuous(
+      trans = "log1p",
+      breaks = c(0, 10, 1e2, 1e3, 1e4, 5e4, 1.5e5)
+    ) +
+    scale_x_continuous(breaks = 1980:2030) +
+    expand_limits(y = 0) +
+    labs(x = "Year", y = expression(paste("Density (kg ", nmi^-2, ")"))) +
+    theme(axis.title.y = element_blank()),
+
+  ggplot(
+    stn %>%
+      mutate(gearname = ifelse(grepl("^32", gear), "Campelen", "Alfredo")),
+    aes(x = gearname, y = rho_biomass)
+  ) +
+    geom_boxplot() +
+    facet_wrap(~commonname) +
+    scale_y_continuous(
+      trans = "log1p",
+      breaks = c(0, 10, 1e2, 1e3, 1e4, 5e4, 1.5e5)
+    ) +
+    labs(x = "Gear", y = expression(paste("Density (kg ", nmi^-2, ")"))),
+
+  ggplot(
+    stn %>%
+      filter(rho_biomass > 0) %>%
+      mutate(gearname = ifelse(grepl("^32", gear), "Campelen", "Alfredo")),
+    aes(x = gearname, y = rho_biomass)
+  ) +
+    geom_boxplot() +
+    facet_wrap(~commonname) +
+    scale_y_continuous(
+      trans = "log1p",
+      breaks = c(0, 10, 1e2, 1e3, 1e4, 5e4, 1.5e5)
+    ) +
+    expand_limits(y = 0) +
+    labs(x = "Gear", y = expression(paste("Density (kg ", nmi^-2, ")"))) +
+    theme(axis.title.y = element_blank()),
+
+  labels = "auto"
+)
+```
+
+```{r ab-density-comparison, fig.cap="Abundance density differences among data sources (a-b) and gear categories (c-d). b and d have zero densities removed."}
+cowplot::plot_grid(
+  ggplot(stn, aes(x = startyear, y = rho_abundance, group = startyear)) +
+    geom_boxplot() +
+    facet_wrap(~commonname) +
+    scale_y_continuous(
+      trans = "log1p",
+      breaks = c(0, 10, 1e2, 1e3, 1e4, 5e4, 3e5)
+    ) +
+    scale_x_continuous(breaks = 1980:2030) +
+    labs(x = "Year", y = expression(paste("Density (n ", nmi^-2, ")"))),
+
+  ggplot(
+    stn %>%
+      filter(rho_abundance > 0),
+    aes(x = startyear, y = rho_abundance, group = startyear)
+  ) +
+    geom_boxplot() +
+    facet_wrap(~commonname) +
+    scale_y_continuous(
+      trans = "log1p",
+      breaks = c(0, 10, 1e2, 1e3, 1e4, 5e4, 3e5)
+    ) +
+    scale_x_continuous(breaks = 1980:2030) +
+    expand_limits(y = 0) +
+    labs(x = "Year", y = expression(paste("Density (n ", nmi^-2, ")"))) +
+    theme(axis.title.y = element_blank()),
+
+  ggplot(
+    stn %>%
+      mutate(gearname = ifelse(grepl("^32", gear), "Campelen", "Alfredo")),
+    aes(x = gearname, y = rho_abundance)
+  ) +
+    geom_boxplot() +
+    facet_wrap(~commonname) +
+    scale_y_continuous(
+      trans = "log1p",
+      breaks = c(0, 10, 1e2, 1e3, 1e4, 5e4, 3e5)
+    ) +
+    labs(x = "Gear", y = expression(paste("Density (n ", nmi^-2, ")"))),
+
+  ggplot(
+    stn %>%
+      filter(rho_biomass > 0) %>%
+      mutate(gearname = ifelse(grepl("^32", gear), "Campelen", "Alfredo")),
+    aes(x = gearname, y = rho_abundance)
+  ) +
+    geom_boxplot() +
+    facet_wrap(~commonname) +
+    scale_y_continuous(
+      trans = "log1p",
+      breaks = c(0, 10, 1e2, 1e3, 1e4, 5e4, 3e5)
+    ) +
+    expand_limits(y = 0) +
+    labs(x = "Gear", y = expression(paste("Density (n ", nmi^-2, ")"))) +
+    theme(axis.title.y = element_blank()),
+
+  labels = "auto"
+)
+```
+
+```{r bm-density-depth, fig.cap = "Bottom depth versus swept area biomass density of each trawl haul (grey dots) allocated to species. The blue line and shading represents loess smoother and standard error. The y-axis is log + 1 transformed."}
+ggplot(stn, aes(x = bottomdepthstart, y = rho_biomass)) +
+  geom_point(color = "grey", size = 0.3) +
+  geom_smooth(fill = "blue") +
+  labs(
+    x = "Bottom depth (m)",
+    y = expression(paste("Density (kg ", nmi^-2, ")"))
+  ) +
+  facet_wrap(~commonname) +
+  scale_y_continuous(
+    trans = "log1p",
+    breaks = c(0, 1, 10, 100, 1e3, 5e3, 1e4, 2.5e4, 5e4, 1e5, 1.5e5),
+    expand = c(0.01, 0)
+  ) +
+  coord_cartesian(ylim = c(0, NA)) +
+  theme_bw(base_size = 10) +
+  scale_x_continuous(breaks = seq(0, 2000, 200), expand = c(0.01, 0))
+```
+
+### Maps
+
+```{r, fig.cap = "Abundance (A, C) and biomass (B, D) swept area densities for beaked redfish (A, B) and golden redfish (C, D) averaged over all data for a grid covering the study area. Grey dots indicate bottom trawl stations.", fig.height=12}
+
+grid <- st_as_sf(
+  expand.grid(lon = attributes(p)$limits[1:2], lat = attributes(p)$limits[3:4]),
+  coords = c("lon", "lat")
+) %>%
+  st_set_crs(attributes(p)$crs) %>%
+  st_make_grid(n = 30) %>%
+  st_transform(4326) %>%
+  st_as_sf(data.frame(id = 1:length(.)), geometry = .)
+
+plots <- lapply(levels(stn$commonname), function(k) {
+  x <- stn %>%
+    filter(commonname == k) %>%
+    st_as_sf(coords = c("longitudestart", "latitudestart"), crs = 4326) %>%
+    st_join(grid[, "id"])
+
+  y <- x %>%
+    st_set_geometry(NULL) %>%
+    group_by(id) %>%
+    summarise(
+      bm = mean(rho_biomass, na.rm = TRUE),
+      ab = mean(rho_abundance, na.rm = TRUE)
+    )
+
+  z1 <- grid %>% full_join(y, by = "id") %>% filter(!is.na(ab))
+
+  z2 <- grid %>% full_join(y, by = "id") %>% filter(!is.na(bm))
+
+  p1 <- basemap(data = stn, grid.col = NA) +
+    geom_sf(data = z1, aes(fill = log10(ab + 1)), size = LS(0.05)) +
+    geom_spatial_point(
+      data = stn,
+      aes(x = longitudestart, y = latitudestart),
+      shape = ".",
+      color = "grey40",
+      size = 0.01,
+      alpha = 0.1
+    ) +
+    labs(
+      fill = "Mean abundance\ndensity (log10(rho + 1))\nind/nmi2",
+      subtitle = k
+    ) +
+    scale_fill_distiller(palette = "Spectral", na.value = NA) +
+    theme(
+      legend.position = "bottom",
+      axis.text = element_blank(),
+      axis.title = element_blank()
+    )
+
+  p2 <- basemap(data = stn, grid.col = NA) +
+    geom_sf(data = z2, aes(fill = log10(bm + 1)), size = LS(0.05)) +
+    geom_spatial_point(
+      data = stn,
+      aes(x = longitudestart, y = latitudestart),
+      shape = ".",
+      color = "grey40",
+      size = 0.01,
+      alpha = 0.1
+    ) +
+    labs(
+      fill = "Mean biomass\ndensity (log10(rho + 1))\nkg/nmi2",
+      subtitle = k
+    ) +
+    scale_fill_distiller(palette = "Spectral", na.value = NA) +
+    theme(
+      legend.position = "bottom",
+      axis.text = element_blank(),
+      axis.title = element_blank()
+    )
+
+  list(reorder_layers(p1), reorder_layers(p2))
+})
+
+cowplot::plot_grid(plotlist = flattenlist(plots), ncol = 2, labels = "AUTO")
+```
+
+```{r, fig.cap = "Annual distribution of stations with biomass density of beaked redfish scaled to symbol color and size.", fig.height=9}
+
+x <- stn %>%
+  filter(commonname == "snabeluer", !is.na(rho_biomass)) %>%
+  mutate(value = rho_biomass)
+
+bubble_map(x, ncol = 3)
+```
+
+```{r, fig.cap = "Annual distribution of stations with biomass density of golden redfish scaled to symbol color and size.", fig.height=9}
+
+x <- stn %>%
+  filter(commonname == "vanlig uer", !is.na(rho_biomass)) %>%
+  mutate(value = rho_biomass)
+
+bubble_map(x, ncol = 3)
+```
+
+# Individual level data
+
+## Alternatives
+
+There are two alternative to obtain the data from: the V element in the spd files, which is similar to individual data in current Biotic format and the U element which contains information about length distributions, but does not contain sex nor maturity stage.   
+
+### Individual data
+
+```{r}
+if (update_data) {
+  tmp <- stn %>%
+    dplyr::filter(biomass > 0 | count > 0) %>%
+    dplyr::select(cruise, startyear, callsignal, serialnumber) %>%
+    distinct() %>%
+    mutate(id = paste(cruise, startyear, callsignal, serialnumber, sep = "_"))
+
+  x <- lapply(y, function(k) k$indall) %>%
+    bind_rows() %>%
+    filter(
+      commonname %in% filter_sp,
+      gearcategory == "Bottom trawls",
+      !is.na(distance),
+      !is.na(latitudestart),
+      !is.na(longitudestart),
+      !is.na(length)
+    ) %>%
+    collect() %>%
+    dplyr::select(where(~ !all(is.na(.x)))) %>%
+    mutate(
+      id = paste(cruise, startyear, callsignal, serialnumber, sep = "_")
+    ) %>%
+    filter(id %in% tmp$id) %>% # note that the station filtering is done here
+    dplyr::select(-id)
+
+  if (!"sex" %in% colnames(x)) {
+    x$sex <- NA
+  }
+
+  if (!"maturationstage" %in% colnames(x)) {
+    x$maturationstage <- NA
+  }
+
+  x <- x %>%
+    mutate(sex = ifelse(!is.na(sex) & !sex %in% 1:2, NA, sex)) %>%
+    mutate(cruiseseries = "BlkvProj", .after = startyear) %>%
+    ungroup()
+
+  # Correct maturation stage
+
+  # matStages <- readxl::read_excel("data/in/Atlantic halibut maturity stages.xlsx")
+  # ms <- na.omit(matStages[c("maturationstage", "maturationstage_becomes")])
+  # ms[,grep("becomes", names(ms))] <- suppressWarnings(as.integer(ms[[grep("becomes", names(ms))]]))
+  # ss <- na.omit(matStages[c("specialstage", "specialstage_becomes")])
+  # ss[,grep("becomes", names(ss))] <- suppressWarnings(as.integer(ss[[grep("becomes", names(ss))]]))
+  #
+  # x <- x %>% mutate(
+  #   maturationstage =
+  #     recode(maturationstage, !!!setNames(ms$maturationstage_becomes,
+  #                                         ms$maturationstage)))
+
+  ## Reduce number of columns and save
+
+  ind <- x %>%
+    group_by(
+      cruiseseries,
+      startyear,
+      cruise,
+      callsignal,
+      serialnumber,
+      catchsampleid,
+      commonname
+    ) %>%
+    mutate(lengthsamplecount = n()) %>%
+    ungroup() %>%
+    mutate(
+      repN = catchcount / lengthsamplecount,
+      repN = ifelse(is.na(repN), lengthsamplecount, repN)
+    ) %>%
+    rename("superindividuals" = "repN") %>%
+    dplyr::select(
+      cruiseseries,
+      startyear,
+      cruise,
+      callsignal,
+      serialnumber,
+      catchsampleid,
+      specimenid,
+      commonname,
+      superindividuals,
+      sex,
+      maturationstage,
+      catchweight,
+      catchcount,
+      individualweight,
+      length
+    ) %>%
+    mutate(length = round(100 * length + 1e-6, 0)) %>%
+    # mutate(commonname = if_else(commonname == "uer", "vanlig uer", commonname)) %>%
+    mutate(commonname = factor(commonname, levels = levels(stn$commonname)))
+
+  write_rds(
+    ind,
+    'data/survey data/ind_Blakveite_prosjektet.rds',
+    compress = "xz"
+  )
+} else {
+  ind <- read_rds('data/survey data/ind_Blakveite_prosjektet.rds')
+}
+```
+
+### Length distribution data
+
+```{r}
+if (update_data) {
+  tmp <- stn %>%
+    dplyr::filter(biomass > 0 | count > 0) %>%
+    dplyr::select(cruise, startyear, callsignal, serialnumber) %>%
+    distinct() %>%
+    mutate(id = paste(cruise, startyear, callsignal, serialnumber, sep = "_"))
+
+  x <- lapply(y, function(k) k$ldist) %>%
+    bind_rows() %>%
+    filter(
+      commonname %in% filter_sp,
+      gearcategory == "Bottom trawls",
+      !is.na(distance),
+      !is.na(latitudestart),
+      !is.na(longitudestart),
+      !is.na(length)
+    ) %>%
+    collect() %>%
+    dplyr::select(where(~ !all(is.na(.x)))) %>%
+    mutate(
+      id = paste(cruise, startyear, callsignal, serialnumber, sep = "_")
+    ) %>%
+    filter(id %in% tmp$id) %>% # note that the station filtering is done here
+    dplyr::select(-id) %>%
+    mutate(cruiseseries = "BlkvProj", .after = startyear)
+
+  ## Reduce number of columns and save
+
+  ind_ldist <- x %>%
+    # mutate(commonname = if_else(commonname == "uer", "vanlig uer", commonname)) %>%
+    mutate(commonname = factor(commonname, levels = levels(stn$commonname))) %>%
+    dplyr::select(
+      cruiseseries,
+      startyear,
+      cruise,
+      callsignal,
+      serialnumber,
+      catchsampleid,
+      commonname,
+      catchcount,
+      length
+    ) %>%
+    group_by(
+      cruiseseries,
+      startyear,
+      cruise,
+      callsignal,
+      serialnumber,
+      catchsampleid,
+      commonname
+    ) %>%
+    mutate(lengthsamplecount = n()) %>%
+    ungroup() %>%
+    mutate(
+      repN = catchcount / lengthsamplecount,
+      repN = ifelse(is.na(repN), lengthsamplecount, repN)
+    ) %>%
+    mutate(
+      length = round(100 * length + 1e-6, 0),
+      length = cut(length, seq(1, max(length) + 1), right = FALSE)
+    ) %>%
+    group_by(
+      cruiseseries,
+      startyear,
+      cruise,
+      callsignal,
+      serialnumber,
+      catchsampleid,
+      commonname,
+      length,
+      repN,
+      catchcount,
+      lengthsamplecount
+    ) %>%
+    reframe(superindividuals = n()) %>%
+    mutate(superindividuals = superindividuals * repN) %>%
+    dplyr::select(-repN) %>%
+    mutate(
+      length = length %>%
+        as.character() %>%
+        strsplit(",") %>%
+        sapply("[", 1) %>%
+        gsub("\\[|)", "", .) %>%
+        as.integer()
+    ) %>%
+    mutate(sex = NA, .before = "length")
+
+  write_rds(
+    ind_ldist,
+    'data/survey data/ind_ldist_Blakveite_prosjektet.rds',
+    compress = "xz"
+  )
+} else {
+  ind_ldist <- read_rds('data/survey data/ind_ldist_Blakveite_prosjektet.rds')
+}
+```
+
+After inspecting the data, it appears that the V element only contains beaked redfish measurements for 2003-2005, while the U element also contains some golden redfish measurements. Hence we'll use the U element (ind_ldist) data. 
+
+#### Length distribution data overview
+
+```{r}
+tmp <- ind_ldist %>%
+  group_by(cruiseseries, startyear, serialnumber, commonname) %>%
+  reframe(n = sum(superindividuals)) %>%
+  group_by(cruiseseries, startyear, commonname) %>%
+  reframe(total_measured = sum(n), stations_with_measured = n()) %>%
+  full_join(
+    stn %>%
+      filter(biomass > 0) %>%
+      group_by(cruiseseries, startyear, commonname) %>%
+      reframe(total_positive_stations = n()),
+    by = join_by(cruiseseries, startyear, commonname)
+  ) %>%
+  replace_na(list(total_measured = 0, stations_with_measured = 0)) %>%
+  mutate(
+    Yes = stations_with_measured,
+    No = total_positive_stations - stations_with_measured
+  ) %>%
+  arrange(cruiseseries, startyear, commonname) %>%
+  pivot_longer(cols = c(Yes, No)) %>%
+  mutate(name = factor(name, levels = c("Yes", "No")))
+```
+
+`r tmp %>% filter(name == "No") %>% group_by(commonname) %>% reframe(value = sum(value)) %>% pull(value) %>% paste(collapse = " and ")` out of `r tmp %>% group_by(commonname) %>% reframe(value = sum(value)) %>% pull(value) %>% paste(collapse = " and ")` stations with `r tmp %>% filter(name == "No") %>% group_by(commonname) %>% reframe(value = sum(value)) %>% pull(commonname) %>% paste(collapse = " and ")` in catch were not length measured, respectively. These stations originated mostly from 1998 and 1999 (Figure \@ref(fig:n-length-measured)).
+
+
+```{r n-length-measured, fig.cap = paste("Number of stations with and without length measured", sp_name, "by year and data source.")}
+tmp %>%
+  ggplot(aes(x = startyear, y = value, fill = name)) +
+  geom_col() +
+  labs(
+    x = "Year",
+    y = "Number of stations",
+    fill = "Length\nmeasured\nstation"
+  ) +
+  scale_y_continuous(expand = c(0.01, 0)) +
+  scale_x_continuous(
+    expand = c(0, 0),
+    breaks = seq(1980, 2030, 2),
+    labels = substr(seq(1980, 2030, 2), 3, 4)
+  ) +
+  facet_grid(cruiseseries ~ commonname) +
+  theme_bw() +
+  scale_fill_manual(values = c("Yes" = "grey", "No" = "darkred")) +
+  theme(legend.position = "bottom")
+```
+
+
+```{r, fig.cap = paste("Size distribution of", sp_name, "among years extrapolated to the entire catch from length and individual measured fish.")}
+ind_ldist %>%
+  mutate(
+    sex = factor(
+      ifelse(
+        is.na(sex),
+        "Unknown",
+        ifelse(sex == 1, "Female", ifelse(sex == 2, "Male", "Wrong"))
+      ),
+      levels = rev(c("Female", "Male", "Unknown", "Wrong"))
+    )
+  ) %>%
+  uncount(round(superindividuals, 0)) %>%
+  ggplot(aes(x = length)) +
+  geom_freqpoly(aes(color = commonname), binwidth = 2) +
+  facet_wrap(~startyear, ncol = 5, scales = "free_y", dir = "v") +
+  labs(y = "Count", x = "Length (cm)", fill = "Species", color = "Species") +
+  scale_y_continuous(breaks = function(k) round(c(0, max(k, na.rm = TRUE)))) +
+  scale_x_continuous() +
+  # scale_fill_manual(
+  #   values = c("Female" = "#FF5F68", "Male" = "#449BCF", "Unknown" = "grey",
+  #              "Wrong" = "black"), drop = TRUE, limits = force) +
+  guides(fill = guide_legend(reverse = TRUE)) +
+  coord_cartesian(expand = FALSE) +
+  theme(
+    legend.position = "bottom",
+    strip.background = element_blank(),
+    strip.text = element_text(size = 10, face = 2)
+  )
+```
+
+```{r, fig.cap = paste("Summed size distribution of", sp_name, " extrapolated to the entire catch from length and individual measured fish.")}
+ind_ldist %>%
+  mutate(
+    sex = factor(
+      ifelse(
+        is.na(sex),
+        "Unknown",
+        ifelse(sex == 1, "Female", ifelse(sex == 2, "Male", "Wrong"))
+      ),
+      levels = rev(c("Female", "Male", "Unknown", "Wrong"))
+    )
+  ) %>%
+  uncount(round(superindividuals, 0)) %>%
+  ggplot(aes(x = length)) +
+  geom_freqpoly(aes(color = commonname), binwidth = 2) +
+  facet_wrap(~cruiseseries, ncol = 3, scales = "free_y") +
+  labs(y = "Count", x = "Length (cm)", fill = "Species", color = "Species") +
+  scale_y_continuous(breaks = function(k) round(c(0, max(k, na.rm = TRUE)))) +
+  scale_x_continuous() +
+  # scale_fill_manual(
+  #   values = c("Female" = "#FF5F68", "Male" = "#449BCF", "Unknown" = "grey",
+  #              "Wrong" = "black"), drop = TRUE, limits = force) +
+  guides(fill = guide_legend(reverse = TRUE)) +
+  coord_cartesian(expand = FALSE) +
+  theme(
+    legend.position = "bottom",
+    strip.background = element_blank(),
+    strip.text = element_text(size = 10, face = 2)
+  )
+```
+
+#### Individual data overview
+
+There was maturity data for beaked redfish, but not for golden redfish. 
+
+```{r, fig.cap = "Beaked redfish maturity ogives calculated from the dataset. A shows all data, B data with sex. Red refers to females and blue to males in B."}
+cowplot::plot_grid(
+  plotlist = lapply(ind$commonname %>% unique, function(k) {
+    cowplot::plot_grid(
+      ggFishPlots::plot_maturity(
+        ind %>%
+          filter(commonname == k, !is.na(maturationstage)) %>%
+          mutate(maturity = maturationstage > 1),
+        legend.position = "none",
+        length.bin.width = 5
+      )$plot,
+
+      ggFishPlots::plot_maturity(
+        ind %>%
+          filter(
+            commonname == k,
+            !is.na(maturationstage),
+            !is.na(sex),
+            sex != 3
+          ) %>%
+          mutate(maturity = maturationstage > 1),
+        female.sex = "1",
+        male.sex = "2",
+        split.by.sex = TRUE,
+        legend.position = "none",
+        length.bin.width = 5
+      )$plot,
+      labels = "AUTO",
+      ncol = 1
+    )
+  })
+)
+```
+
+# Combined station level length distributions
+
+The maths for this part can be confusing. They have been through through, but have not been peer-reviewed. There are two methods to choose from. The first option (used currently) uses the densities calculated using station data and splits them to length groups such that the sum for each station equals that of in station data. The second option uses individual data to calculate the densities. Abundance densities between these two methods tend to be equal, but biomass densities differ somewhat because all fish were not weighted. 
+
+Both methods require estimating weight for each length-measured fish. The estimates are taken from the BioticExplorer_database document.  
+
+```{r}
+if (update_data) {
+  lw_coefficients <- readr::read_csv(
+    "data/definitions/length-weight_coefficients.csv",
+    show_col_types = FALSE
+  )
+
+  stn_ldist <- ind_ldist %>%
+    dplyr::select(-sex) %>% # the sex column multiplies the length of the final dataframe by 3. Not worth including for these species
+    # mutate(sex = factor(ifelse(is.na(sex), "Unknown",
+    #                            ifelse(sex > 2, "Unknown",
+    #                                   ifelse(sex == 2, "Male", "Female"))))) %>%
+    left_join(
+      lw_coefficients %>%
+        dplyr::select(species, term, estimate) %>%
+        pivot_wider(names_from = term, values_from = estimate) %>%
+        rename("commonname" = "species"),
+      by = join_by(commonname)
+    ) %>%
+    mutate(weight = a * length^b) %>%
+    dplyr::select(-a, -b) %>%
+    full_join(
+      stn,
+      by = join_by(
+        cruiseseries,
+        startyear,
+        cruise,
+        callsignal,
+        serialnumber,
+        commonname
+      )
+    ) %>%
+    mutate(
+      length_group = cut(length, seq(0, 95, by = 5))
+    ) %>%
+    replace_na(list(superindividuals = 1)) %>%
+    # uncount(superindividuals) %>%
+    mutate(commonname = factor(commonname, levels = levels(stn$commonname)))
+
+  if (!"individualweight" %in% colnames(stn_ldist)) {
+    stn_ldist <- stn_ldist %>% mutate(individualweight = NA)
+  }
+
+  stn_ldist <-
+    stn_ldist %>%
+    group_split(commonname) %>%
+    map(
+      ~ {
+        .x %>%
+          mutate(
+            weight = ifelse(is.na(individualweight), weight, individualweight)
+          ) %>%
+          group_by(
+            cruiseseries,
+            startyear,
+            cruise,
+            callsignal,
+            serialnumber,
+            stationstartdate,
+            longitudestart,
+            latitudestart,
+            bottomdepthstart,
+            gear,
+            gearname,
+            geartype,
+            distance,
+            gear_width,
+            commonname,
+            length_group,
+            count,
+            biomass,
+            rho_abundance,
+            rho_biomass
+          ) %>%
+          reframe(n = sum(superindividuals), weight = n * mean(weight)) %>%
+          mutate(n = ifelse(is.na(length_group), 0, n)) %>%
+          filter(!(is.na(length_group) & rho_biomass > 0)) %>% # removes stations and rows with missing length data
+          group_by(
+            cruiseseries,
+            startyear,
+            cruise,
+            callsignal,
+            serialnumber,
+            stationstartdate,
+            longitudestart,
+            latitudestart,
+            bottomdepthstart,
+            gear,
+            gearname,
+            geartype,
+            distance,
+            gear_width,
+            commonname
+          ) %>%
+          mutate(total_n = sum(n), total_w = sum(weight)) %>%
+          ungroup() %>%
+          mutate(weight = weight / (total_w / biomass)) %>%
+          mutate(
+            rho_biomass = ifelse(
+              biomass == 0,
+              0,
+              rho_biomass * (weight / biomass)
+            ),
+            rho_abundance = ifelse(n == 0, 0, rho_abundance * (n / total_n))
+          ) %>%
+          mutate(n = n / (total_n / count)) %>%
+          dplyr::select(-total_n, -total_w) %>%
+          rename(total_weight = biomass, total_n = count) %>%
+          group_by(
+            cruiseseries,
+            startyear,
+            cruise,
+            callsignal,
+            serialnumber,
+            stationstartdate,
+            longitudestart,
+            latitudestart,
+            bottomdepthstart,
+            gear,
+            gearname,
+            geartype,
+            distance,
+            gear_width,
+            commonname
+          ) %>%
+          complete(
+            length_group,
+            fill = list(n = 0, weight = 0, rho_abundance = 0, rho_biomass = 0),
+            explicit = FALSE
+          ) %>%
+          mutate(total_n = sum(n), total_weight = sum(weight)) %>%
+          replace_na(list(total_n = 0, total_weight = 0)) %>%
+          relocate(rho_abundance, rho_biomass, .after = last_col()) %>%
+          filter(!is.na(length_group))
+      }
+    ) %>%
+    bind_rows()
+
+  write_rds(
+    stn_ldist,
+    'data/survey data/stn_ldist_Blakveite_prosjektet.rds',
+    compress = "xz"
+  )
+} else {
+  stn_ldist <- read_rds('data/survey data/stn_ldist_Blakveite_prosjektet.rds')
+}
+```
+
+## Tests 
+
+```{r}
+nstn_ldist <- stn %>%
+  group_by(cruiseseries, startyear, callsignal, serialnumber, commonname) %>%
+  reframe(rho = sum(rho_biomass)) %>%
+  group_by(cruiseseries, commonname) %>%
+  reframe(
+    `All stations` = n(),
+    `Zero stations` = sum(rho == 0, na.rm = TRUE)
+  ) %>%
+  full_join(
+    stn_ldist %>%
+      group_by(
+        cruiseseries,
+        startyear,
+        callsignal,
+        serialnumber,
+        commonname
+      ) %>%
+      reframe(rho = sum(rho_biomass)) %>%
+      group_by(cruiseseries, commonname) %>%
+      reframe(
+        `Measured stations` = n(),
+        `Zero stations 2` = sum(rho == 0, na.rm = TRUE)
+      ),
+    by = join_by(cruiseseries, commonname)
+  ) %>%
+  ungroup()
+```
+
+Number of zero stations in stn and stn_ldist match: `r all.equal(nstn_ldist[["Zero stations"]], nstn_ldist[["Zero stations 2"]])`
+
+```{r}
+# Make sure that the critical catch information match between stn and snt_ldist
+
+tmp <- stn %>%
+  group_by(cruiseseries, startyear, callsignal, serialnumber, commonname) %>%
+  reframe(
+    bm_stn = sum(rho_biomass, na.rm = TRUE),
+    ab_stn = sum(rho_abundance, na.rm = TRUE),
+    w_stn = sum(biomass, na.rm = TRUE),
+    n_stn = sum(count, na.rm = TRUE)
+  ) %>%
+  left_join(
+    stn_ldist %>%
+      group_by(
+        cruiseseries,
+        startyear,
+        callsignal,
+        serialnumber,
+        commonname
+      ) %>%
+      reframe(
+        bm_ldist = sum(rho_biomass, na.rm = TRUE),
+        ab_ldist = sum(rho_abundance, na.rm = TRUE),
+        w_ldist = sum(weight, na.rm = TRUE),
+        n_ldist = sum(n, na.rm = TRUE)
+      )
+  ) %>%
+  mutate(
+    bm_equal = abs(bm_stn - bm_ldist) < 0.1,
+    ab_equal = abs(ab_stn - ab_ldist) < 0.1,
+    n_equal = abs(n_stn - n_ldist) < 0.1,
+    w_equal = abs(w_stn - w_ldist) < 0.1
+  )
+```
+
+Sum of `rho_biomass` in stn equal to the sum of the same column in stn_ldist: `r all(tmp$bm_equal, na.rm = TRUE)`. `r tmp %>% filter(commonname == "snabeluer") %>% pull(bm_equal) %>% is.na %>% sum` removed beaked redfish and `r tmp %>% filter(commonname == "vanlig uer") %>% pull(bm_equal) %>% is.na %>% sum` removed golden redfish stations due to missing length measurements, respectively. 
+
+Sum of `rho_abundance` in stn equal to the sum of the same column in stn_ldist: `r all(tmp$ab_equal, na.rm = TRUE)`. `r tmp %>% filter(commonname == "snabeluer") %>% pull(ab_equal) %>% is.na %>% sum` removed beaked redfish and `r tmp %>% filter(commonname == "vanlig uer") %>% pull(ab_equal) %>% is.na %>% sum` removed golden redfish stations due to missing length measurements, respectively. 
+
+Sum of the `count` column in stn equal to the sum of the `n` column in stn_ldist: `r all(tmp$n_equal, na.rm = TRUE)`
+
+Sum of the `biomass` column in stn equal to the sum of the `weight` column in stn_ldist: `r all(tmp$w_equal, na.rm = TRUE)`
+
+```{r, fig.cap = "Control plot to compare individual length distribution data and combined station and length distribution data."}
+stn_ldist %>%
+  group_by(cruiseseries, commonname, length_group) %>%
+  reframe(n = sum(n, na.rm = TRUE)) %>%
+  mutate(type = "stn_ldist") %>%
+  bind_rows(
+    ind_ldist %>%
+      mutate(length_group = cut(length, seq(0, 95, by = 5))) %>%
+      group_by(cruiseseries, commonname, length_group) %>%
+      reframe(n = sum(superindividuals)) %>%
+      mutate(type = "ind")
+  ) %>%
+  # pivot_wider(names_from = type, values_from = n) %>%
+  # mutate(diff = 100*(stn_ldist - ind)/ind) %>%
+  ggplot(aes(x = length_group, y = n, fill = type)) +
+  geom_col(color = "black", linewidth = 0.1, position = "dodge") +
+  facet_wrap(cruiseseries ~ commonname, scales = "free_y") +
+  labs(y = "Count", x = "Length group (cm)") +
+  scale_y_continuous(breaks = function(k) round(c(0, max(k, na.rm = TRUE)))) +
+  coord_cartesian(expand = FALSE) +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    strip.background = element_blank(),
+    strip.text = element_text(size = 10, face = 2)
+  )
+```
+
+## Combined overview
+
+```{r}
+nstn_ldist %>%
+  dplyr::select(-`Zero stations 2`) %>% # Zero stations and Zero stations 2 have to match
+  mutate(
+    `Not measured\nstations` = `All stations` - `Measured stations`,
+    `Measured stations` = `Measured stations` - `Zero stations`
+  ) %>%
+  rename("Survey" = "cruiseseries") %>%
+  make_table(
+    caption = paste(
+      "All stations from station data, stations with zero",
+      sp_name,
+      ", stations with length data and stations excluded from the combined dataset due to lack of length measurements by data source."
+    )
+  )
+```
+
+```{r n-stn-ldist, fig.cap = paste("Number of stations in the length resolved dataset with and without", sp_name, "by year. White indicates the number of lost stations due to missing length data.")}
+tmpdt <- stn_ldist %>%
+  group_by(cruiseseries, startyear, callsignal, serialnumber, commonname) %>%
+  reframe(rho_biomass = sum(rho_biomass, na.rm = TRUE)) %>%
+  group_by(startyear, commonname) %>%
+  reframe(
+    yes = sum(rho_biomass > 0, na.rm = TRUE),
+    no = sum(rho_biomass == 0, na.rm = TRUE)
+  ) %>%
+  pivot_longer(cols = c(yes, no)) %>%
+  mutate(name = factor(name, c("no", "yes"))) %>%
+  left_join(
+    stn %>%
+      distinct(
+        cruiseseries,
+        startyear,
+        callsignal,
+        serialnumber,
+        commonname
+      ) %>%
+      group_by(startyear, commonname) %>%
+      count()
+  )
+
+ggplot() +
+  geom_col(
+    data = tmpdt %>% distinct(startyear, commonname, n),
+    aes(x = startyear, y = n),
+    fill = NA,
+    color = "black"
+  ) +
+  geom_col(
+    data = tmpdt,
+    aes(x = startyear, y = value, fill = name),
+    color = "black"
+  ) +
+  labs(x = "Year", y = "Number of stations", fill = "Contains\ntarget taxa") +
+  facet_wrap(~commonname) +
+  scale_fill_manual(values = c("yes" = "#66a182", "no" = "grey")) +
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_x_continuous(
+    breaks = seq(1980, 2030, 2),
+    labels = substr(seq(1980, 2030, 2), 3, 4),
+    expand = c(0.01, 0)
+  ) +
+  theme(legend.position = "bottom")
+```
+
+
+```{r, fig.cap = "Average biomass density + 95% confidence interval by survey time-series and length group for the combined station and length dataset."}
+
+length_groups <- stn_ldist %>%
+  filter(rho_biomass > 0 & !is.na(rho_biomass)) %>%
+  droplevels() %>%
+  pull(length_group) %>%
+  levels()
+
+stn_ldist %>%
+  filter(length_group %in% length_groups) %>%
+  droplevels() %>%
+  group_by(cruiseseries, commonname, length_group) %>%
+  reframe(
+    value = mean(rho_biomass, na.rm = TRUE),
+    se = sd(rho_biomass, na.rm = TRUE) / sqrt(length(!is.na(rho_biomass)))
+  ) %>%
+  ggplot(aes(
+    x = length_group,
+    y = value,
+    ymin = value,
+    ymax = value + 1.96 * se
+  )) +
+  geom_col(
+    color = "black",
+    linewidth = 0.3,
+    position = "dodge",
+    fill = "grey"
+  ) +
+  geom_errorbar(width = 0.2, linewidth = 0.3) +
+  facet_wrap(cruiseseries ~ commonname, scales = "free") +
+  labs(
+    y = expression(paste("Average density (kg ", nmi^-2, ")")),
+    x = "Length group (cm)"
+  ) +
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  coord_cartesian(expand = FALSE) +
+  theme(
+    legend.position = "bottom",
+    strip.background = element_blank(),
+    strip.text = element_text(size = 10, face = 2)
+  )
+```
+
+```{r, fig.cap = "Average abundance density + 95% confidence interval by survey time-series for the combined station and length dataset."}
+
+length_groups <- stn_ldist %>%
+  filter(rho_abundance > 0, !is.na(rho_abundance)) %>%
+  droplevels() %>%
+  pull(length_group) %>%
+  levels()
+
+stn_ldist %>%
+  filter(length_group %in% length_groups) %>%
+  droplevels() %>%
+  group_by(cruiseseries, commonname, length_group) %>%
+  reframe(
+    value = mean(rho_abundance, na.rm = TRUE),
+    se = sd(rho_abundance, na.rm = TRUE) / sqrt(length(!is.na(rho_abundance)))
+  ) %>%
+  ggplot(aes(
+    x = length_group,
+    y = value,
+    ymin = value,
+    ymax = value + 1.96 * se
+  )) +
+  geom_col(
+    color = "black",
+    linewidth = 0.3,
+    position = "dodge",
+    fill = "grey"
+  ) +
+  geom_errorbar(width = 0.2, linewidth = 0.3) +
+  facet_wrap(cruiseseries ~ commonname, scales = "free_y") +
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  labs(
+    y = expression(paste("Average density (n ", nmi^-2, ")")),
+    x = "Length group (cm)"
+  ) +
+  coord_cartesian(expand = FALSE) +
+  theme(
+    legend.position = "bottom",
+    strip.background = element_blank(),
+    strip.text = element_text(size = 10, face = 2)
+  )
+```
+
+```{r, fig.cap = "Average biomass (A) and abundance (B) density of beaked redfish + 95% confidence interval by year and length group for the combined station and length dataset.", fig.height=7}
+
+length_groups <- stn_ldist %>%
+  filter(commonname == "snabeluer", rho_biomass > 0) %>%
+  droplevels() %>%
+  pull(length_group) %>%
+  levels()
+
+p1 <- stn_ldist %>%
+  filter(commonname == "snabeluer") %>%
+  filter(length_group %in% length_groups) %>%
+  droplevels() %>%
+  group_by(startyear, length_group) %>%
+  reframe(
+    value = mean(rho_biomass, na.rm = TRUE),
+    se = sd(rho_biomass, na.rm = TRUE) / sqrt(length(!is.na(rho_biomass)))
+  ) %>%
+  ggplot(aes(
+    x = length_group,
+    y = value,
+    ymin = value,
+    ymax = value + 1.96 * se
+  )) +
+  geom_col(
+    color = "black",
+    linewidth = 0.3,
+    position = "dodge",
+    fill = "grey"
+  ) +
+  geom_errorbar(width = 0.2, linewidth = 0.3) +
+  facet_wrap(~startyear, ncol = 6, dir = "v", scales = "free_y") +
+  labs(
+    y = expression(paste("Average density (kg ", nmi^-2, ")")),
+    x = "Length group (cm)"
+  ) +
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  coord_cartesian(expand = FALSE) +
+  theme(
+    legend.position = "bottom",
+    strip.background = element_blank(),
+    strip.text = element_text(size = 10, face = 2)
+  )
+
+p2 <- stn_ldist %>%
+  filter(commonname == "snabeluer") %>%
+  filter(length_group %in% length_groups) %>%
+  droplevels() %>%
+  group_by(startyear, length_group) %>%
+  reframe(
+    value = mean(rho_biomass, na.rm = TRUE),
+    se = sd(rho_biomass, na.rm = TRUE) / sqrt(length(!is.na(rho_biomass)))
+  ) %>%
+  ggplot(aes(
+    x = length_group,
+    y = value,
+    ymin = value,
+    ymax = value + 1.96 * se
+  )) +
+  geom_col(
+    color = "black",
+    linewidth = 0.3,
+    position = "dodge",
+    fill = "grey"
+  ) +
+  geom_errorbar(width = 0.2, linewidth = 0.3) +
+  facet_wrap(~startyear, ncol = 6, dir = "v", scales = "free_y") +
+  labs(
+    y = expression(paste("Average density (n ", nmi^-2, ")")),
+    x = "Length group (cm)"
+  ) +
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  coord_cartesian(expand = FALSE) +
+  theme(
+    legend.position = "bottom",
+    strip.background = element_blank(),
+    strip.text = element_text(size = 10, face = 2)
+  )
+
+cowplot::plot_grid(p1, p2, labels = "AUTO", ncol = 1)
+```
+
+```{r, fig.cap = "Average biomass (A) and abundance (B) density of golden redfish + 95% confidence interval by year and length group for the combined station and length dataset.", fig.height=7}
+
+length_groups <- stn_ldist %>%
+  filter(commonname == "vanlig uer", rho_biomass > 0) %>%
+  droplevels() %>%
+  pull(length_group) %>%
+  levels()
+
+p1 <- stn_ldist %>%
+  filter(commonname == "vanlig uer") %>%
+  filter(length_group %in% length_groups) %>%
+  droplevels() %>%
+  group_by(startyear, length_group) %>%
+  reframe(
+    value = mean(rho_biomass, na.rm = TRUE),
+    se = sd(rho_biomass, na.rm = TRUE) / sqrt(length(!is.na(rho_biomass)))
+  ) %>%
+  ggplot(aes(
+    x = length_group,
+    y = value,
+    ymin = value,
+    ymax = value + 1.96 * se
+  )) +
+  geom_col(
+    color = "black",
+    linewidth = 0.3,
+    position = "dodge",
+    fill = "grey"
+  ) +
+  geom_errorbar(width = 0.2, linewidth = 0.3) +
+  facet_wrap(~startyear, ncol = 6, dir = "v", scales = "free_y") +
+  labs(
+    y = expression(paste("Average density (kg ", nmi^-2, ")")),
+    x = "Length group (cm)"
+  ) +
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  coord_cartesian(expand = FALSE) +
+  theme(
+    legend.position = "bottom",
+    strip.background = element_blank(),
+    strip.text = element_text(size = 10, face = 2)
+  )
+
+p2 <- stn_ldist %>%
+  filter(commonname == "vanlig uer") %>%
+  filter(length_group %in% length_groups) %>%
+  droplevels() %>%
+  group_by(startyear, length_group) %>%
+  reframe(
+    value = mean(rho_biomass, na.rm = TRUE),
+    se = sd(rho_biomass, na.rm = TRUE) / sqrt(length(!is.na(rho_biomass)))
+  ) %>%
+  ggplot(aes(
+    x = length_group,
+    y = value,
+    ymin = value,
+    ymax = value + 1.96 * se
+  )) +
+  geom_col(
+    color = "black",
+    linewidth = 0.3,
+    position = "dodge",
+    fill = "grey"
+  ) +
+  geom_errorbar(width = 0.2, linewidth = 0.3) +
+  facet_wrap(~startyear, ncol = 6, dir = "v", scales = "free_y") +
+  labs(
+    y = expression(paste("Average density (n ", nmi^-2, ")")),
+    x = "Length group (cm)"
+  ) +
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  coord_cartesian(expand = FALSE) +
+  theme(
+    legend.position = "bottom",
+    strip.background = element_blank(),
+    strip.text = element_text(size = 10, face = 2)
+  )
+
+cowplot::plot_grid(p1, p2, labels = "AUTO", ncol = 1)
+```
+
+
+```{r bm-density-depth-length, fig.cap = "Bottom depth versus swept area biomass density of each trawl haul (grey dots) allocated to length groups. The blue line and shading represents loess smoother and standard error. The y-axis is log + 1 transformed.", fig.height=12}
+
+length_groups <- stn_ldist %>%
+  filter(rho_biomass > 0) %>%
+  droplevels() %>%
+  pull(length_group) %>%
+  levels()
+
+
+ggplot(
+  stn_ldist %>%
+    filter(length_group %in% length_groups) %>%
+    droplevels(),
+  aes(x = bottomdepthstart, y = rho_biomass)
+) +
+  geom_point(color = "grey", size = 0.3) +
+  geom_smooth(fill = "blue") +
+  labs(
+    x = "Bottom depth (m)",
+    y = expression(paste("Density (kg ", nmi^-2, ")"))
+  ) +
+  facet_grid(length_group ~ commonname) +
+  scale_y_continuous(
+    trans = "log1p",
+    # breaks = c(0,1,10,100,1e3,5e3,1e4,2.5e4,5e4,1e5,1.5e5),
+    expand = c(0.01, 0)
+  ) +
+  coord_cartesian(ylim = c(0, NA)) +
+  theme_bw(base_size = 10) +
+  scale_x_continuous(breaks = seq(0, 2000, 200), expand = c(0.01, 0))
+```
+
+### Maps
+
+```{r, fig.cap = paste("Spatial distribution of", sp_name, "taxa across all years and surveys measured using average biomass density. Size of the pie charts refers to the average total biomass density."), fig.height=10}
+# cols <- c("Male" = "#449BCF", "Female" = "#FF5F68", "Unknown" = "grey")
+by <- "commonname"
+base_size <- 10
+legend_lab <- "Redfish taxa"
+
+bm <- basemap(
+  stn,
+  bathy.style = "rcg",
+  legends = FALSE,
+  base_size = base_size
+) +
+  ggnewscale::new_scale_fill() +
+  geom_col(
+    data = data.frame(
+      z = factor(levels(stn_ldist[[by]]), levels(stn_ldist[[by]])),
+      x = 1,
+      y = 1
+    ),
+    aes(x = x, y = y, fill = z)
+  ) +
+  labs(xlab = NULL, ylab = NULL, fill = legend_lab) +
+  # scale_fill_manual(values = cols, drop = FALSE) +
+  theme(
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    plot.title = element_text(hjust = 0.5, size = base_size),
+    plot.margin = unit(c(0.2, 0, 0.2, 0), "cm")
+  )
+
+roi <- stn %>%
+  st_as_sf(coords = c("longitudestart", "latitudestart"), crs = 4326) %>%
+  sf::st_transform(attributes(bm)$crs) %>%
+  summarise(geometry = st_combine(geometry)) %>%
+  concaveman::concaveman(concavity = 3) %>%
+  st_make_valid() %>%
+  st_buffer(5e4)
+
+grid <- roi %>%
+  st_make_grid(n = c(15, 15), what = "polygons") %>%
+  st_sf()
+
+grid_clip <- sf::st_intersection(grid, roi)
+
+tmp <- stn_ldist %>%
+  filter(!is.na(rho_biomass)) %>%
+  group_by(
+    cruiseseries,
+    startyear,
+    cruise,
+    callsignal,
+    serialnumber,
+    longitudestart,
+    latitudestart,
+    bottomdepthstart,
+    commonname
+  ) %>%
+  reframe(value = sum(rho_biomass)) %>%
+  st_as_sf(coords = c("longitudestart", "latitudestart"), crs = 4326) %>%
+  sf::st_transform(attributes(bm)$crs) %>%
+  add_column(grid = as.integer(st_intersects(., grid_clip))) %>%
+  group_by(grid, commonname) %>%
+  reframe(value = mean(value)) %>%
+  group_by(grid) %>%
+  mutate(total = sum(value)) %>%
+  left_join(
+    grid_clip %>%
+      st_centroid() %>%
+      st_coordinates() %>%
+      as_tibble() %>%
+      add_column(grid = 1:nrow(.), .before = 1)
+  ) %>%
+  ungroup() %>%
+  mutate(scal = sqrt(total / max(.$total)) * 4e4 + 3e4) %>%
+  group_by(grid, X, Y, total, scal)
+
+
+df.grobs <- tmp %>%
+  filter(total > 0) %>%
+  do(
+    subplots = ggplot(., aes(x = 1, y = value, fill = commonname)) +
+      geom_col(
+        position = "fill",
+        alpha = 0.75,
+        colour = "white",
+        linewidth = LS(0.5)
+      ) +
+      coord_polar(theta = "y") +
+      # scale_fill_manual(values = cols, drop = FALSE) +
+      theme_void() +
+      guides(fill = "none")
+  ) %>%
+  mutate(
+    subgrobs = list(annotation_custom(
+      ggplotGrob(subplots),
+      xmin = (X - scal),
+      ymin = (Y - scal),
+      xmax = (X + scal),
+      ymax = (Y + scal)
+    ))
+  )
+
+bm + df.grobs$subgrobs
+```
+
+```{r, fig.cap = "Spatial distribution of beaked redfish size classes across all years and surveys measured using average biomass density. Size of the pie charts refers to the average total biomass density.", fig.height=10}
+
+length_groups <- stn_ldist %>%
+  filter(commonname == "snabeluer", rho_biomass > 0) %>%
+  droplevels() %>%
+  pull(length_group) %>%
+  levels()
+
+by <- "length_group"
+base_size <- 10
+legend_lab <- "Size class"
+
+bm <- basemap(
+  stn,
+  bathy.style = "rcg",
+  legends = FALSE,
+  base_size = base_size
+) +
+  ggnewscale::new_scale_fill() +
+  geom_col(
+    data = data.frame(z = factor(length_groups, length_groups), x = 1, y = 1),
+    aes(x = x, y = y, fill = z)
+  ) +
+  labs(xlab = NULL, ylab = NULL, fill = legend_lab) +
+  scale_fill_viridis_d() +
+  theme(
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    plot.title = element_text(hjust = 0.5, size = base_size),
+    plot.margin = unit(c(0.2, 0, 0.2, 0), "cm")
+  )
+
+roi <- stn %>%
+  st_as_sf(coords = c("longitudestart", "latitudestart"), crs = 4326) %>%
+  sf::st_transform(attributes(bm)$crs) %>%
+  summarise(geometry = st_combine(geometry)) %>%
+  concaveman::concaveman(concavity = 3) %>%
+  st_make_valid() %>%
+  st_buffer(5e4)
+
+grid <- roi %>%
+  st_make_grid(n = c(15, 15), what = "polygons") %>%
+  st_sf()
+
+grid_clip <- st_intersection(grid, roi)
+
+tmp <- stn_ldist %>%
+  filter(!is.na(rho_biomass)) %>%
+  filter(commonname == "snabeluer") %>%
+  filter(length_group %in% length_groups) %>%
+  droplevels() %>%
+  group_by(
+    cruiseseries,
+    startyear,
+    cruise,
+    callsignal,
+    serialnumber,
+    longitudestart,
+    latitudestart,
+    bottomdepthstart,
+    length_group
+  ) %>%
+  summarise(value = sum(rho_biomass)) %>%
+  st_as_sf(coords = c("longitudestart", "latitudestart"), crs = 4326) %>%
+  sf::st_transform(attributes(bm)$crs) %>%
+  add_column(grid = as.integer(st_intersects(., grid_clip))) %>%
+  group_by(grid, length_group) %>%
+  reframe(value = mean(value)) %>%
+  group_by(grid) %>%
+  mutate(total = sum(value)) %>%
+  left_join(
+    grid_clip %>%
+      st_centroid() %>%
+      st_coordinates() %>%
+      as_tibble() %>%
+      add_column(grid = 1:nrow(.), .before = 1)
+  ) %>%
+  ungroup() %>%
+  mutate(scal = sqrt(total / max(.$total)) * 4e4 + 3e4) %>%
+  group_by(grid, X, Y, total, scal)
+
+df.grobs <- tmp %>%
+  filter(total > 0) %>%
+  do(
+    subplots = ggplot(., aes(x = 1, y = value, fill = length_group)) +
+      geom_col(
+        position = "fill",
+        alpha = 0.75,
+        colour = "white",
+        linewidth = LS(0.5)
+      ) +
+      coord_polar(theta = "y") +
+      scale_fill_viridis_d(drop = FALSE) +
+      theme_void() +
+      guides(fill = "none")
+  ) %>%
+  mutate(
+    subgrobs = list(annotation_custom(
+      ggplotGrob(subplots),
+      xmin = (X - scal),
+      ymin = (Y - scal),
+      xmax = (X + scal),
+      ymax = (Y + scal)
+    ))
+  )
+
+
+bm + df.grobs$subgrobs
+```
+
+```{r, fig.cap = "Spatial distribution of golden redfish size classes across all years and surveys measured using average biomass density. Size of the pie charts refers to the average total biomass density.", fig.height=10}
+
+length_groups <- stn_ldist %>%
+  filter(commonname == "vanlig uer", rho_biomass > 0) %>%
+  droplevels() %>%
+  pull(length_group) %>%
+  levels()
+
+by <- "length_group"
+base_size <- 10
+legend_lab <- "Size class"
+
+bm <- basemap(
+  stn,
+  bathy.style = "rcg",
+  legends = FALSE,
+  base_size = base_size
+) +
+  ggnewscale::new_scale_fill() +
+  geom_col(
+    data = data.frame(z = factor(length_groups, length_groups), x = 1, y = 1),
+    aes(x = x, y = y, fill = z)
+  ) +
+  labs(xlab = NULL, ylab = NULL, fill = legend_lab) +
+  scale_fill_viridis_d() +
+  theme(
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    plot.title = element_text(hjust = 0.5, size = base_size),
+    plot.margin = unit(c(0.2, 0, 0.2, 0), "cm")
+  )
+
+roi <- stn %>%
+  st_as_sf(coords = c("longitudestart", "latitudestart"), crs = 4326) %>%
+  sf::st_transform(attributes(bm)$crs) %>%
+  summarise(geometry = st_combine(geometry)) %>%
+  concaveman::concaveman(concavity = 3) %>%
+  st_make_valid() %>%
+  st_buffer(5e4)
+
+grid <- roi %>%
+  st_make_grid(n = c(15, 15), what = "polygons") %>%
+  st_sf()
+
+grid_clip <- st_intersection(grid, roi)
+
+tmp <- stn_ldist %>%
+  filter(!is.na(rho_biomass)) %>%
+  filter(commonname == "vanlig uer") %>%
+  filter(length_group %in% length_groups) %>%
+  droplevels() %>%
+  group_by(
+    cruiseseries,
+    startyear,
+    cruise,
+    callsignal,
+    serialnumber,
+    longitudestart,
+    latitudestart,
+    bottomdepthstart,
+    length_group
+  ) %>%
+  summarise(value = sum(rho_biomass)) %>%
+  st_as_sf(coords = c("longitudestart", "latitudestart"), crs = 4326) %>%
+  sf::st_transform(attributes(bm)$crs) %>%
+  add_column(grid = as.integer(st_intersects(., grid_clip))) %>%
+  group_by(grid, length_group) %>%
+  reframe(value = mean(value)) %>%
+  group_by(grid) %>%
+  mutate(total = sum(value)) %>%
+  left_join(
+    grid_clip %>%
+      st_centroid() %>%
+      st_coordinates() %>%
+      as_tibble() %>%
+      add_column(grid = 1:nrow(.), .before = 1)
+  ) %>%
+  ungroup() %>%
+  mutate(scal = sqrt(total / max(.$total)) * 4e4 + 3e4) %>%
+  group_by(grid, X, Y, total, scal)
+
+df.grobs <- tmp %>%
+  filter(total > 0) %>%
+  do(
+    subplots = ggplot(., aes(x = 1, y = value, fill = length_group)) +
+      geom_col(
+        position = "fill",
+        alpha = 0.75,
+        colour = "white",
+        linewidth = LS(0.5)
+      ) +
+      coord_polar(theta = "y") +
+      scale_fill_viridis_d(drop = FALSE) +
+      theme_void() +
+      guides(fill = "none")
+  ) %>%
+  mutate(
+    subgrobs = list(annotation_custom(
+      ggplotGrob(subplots),
+      xmin = (X - scal),
+      ymin = (Y - scal),
+      xmax = (X + scal),
+      ymax = (Y + scal)
+    ))
+  )
+
+
+bm + df.grobs$subgrobs
+```
