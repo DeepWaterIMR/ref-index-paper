@@ -1,6 +1,6 @@
 # Redfish Survey Index Showcase
 
-This repository contains a minimal, rerunnable showcase for compiling and fitting a redfish survey-index model inspired by Vihtakari et al. (2026), *Demersal distribution and fisheries independent trends of beaked and golden redfish in the Barents and Norwegian Seas* ([doi:10.1093/icesjms/fsag009](https://doi.org/10.1093/icesjms/fsag009)).
+Code repository for Vihtakari et al. (2026): Demersal distribution and fisheries‑independent trends of beaked and golden redfish in the Barents and Norwegian Seas. ICES Journal of Marine Science. [https://doi.org/10.1093/icesjms/fsac127](https://doi.org/10.1093/icesjms/fsag009)
 
 The goal is not to reconstruct the published paper results exactly. The paper used internal and partly restricted data. This public workflow demonstrates the model structure on an updated, curated dataset with Russian data excluded by default.
 
