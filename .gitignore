@@ -5,3 +5,34 @@
 *.Rproj
 *.DS_Store
 ~$*
+.Rproj.user
+
+# Local/editor state
+.Rproj.user/
+.vscode/
+.cache-home/
+.DS_Store
+**/.DS_Store
+
+# Legacy private/reconstruction material kept locally for reference.
+docs/
+R/scripts/
+R/presentation_title_slide_xkcd_graph.R
+
+# Raw/private or bulky data products. Public reproducibility data live in
+# data/public/.
+data/*
+!data/
+!data/public/
+!data/public/**
+!data/gis/
+data/gis/*
+!data/gis/study area.gpkg
+!data/gis/russian_eez.*
+
+# Local QA outputs and rendered products.
+review/
+output/
+*.html
+*.pdf
+*.docx

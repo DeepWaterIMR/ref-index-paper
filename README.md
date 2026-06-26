@@ -1,11 +1,52 @@
-# Demersal distribution and fisheries independent trends of beaked and golden redfish in the Barents and Norwegian Seas
+# Redfish Survey Index Showcase
 
-Code repository for Vihtakari et al. (2026): Demersal distribution and fisheries‑independent trends of beaked and golden redfish in the Barents and Norwegian Seas. ICES Journal of Marine Science. https://doi.org/10.1093/icesjms/fsac127
+This repository contains a minimal, rerunnable showcase for compiling and fitting a redfish survey-index model inspired by Vihtakari et al. (2026), *Demersal distribution and fisheries independent trends of beaked and golden redfish in the Barents and Norwegian Seas* ([doi:10.1093/icesjms/fsag009](https://doi.org/10.1093/icesjms/fsag009)).
 
-Code used to calculate compiled survey indices for beaked and golden redfish in the Norwegian and Barents Seas, as presented in the paper, will be uploaded here once data sharing and licencing has been sorted out. 
+The goal is not to reconstruct the published paper results exactly. The paper used internal and partly restricted data. This public workflow demonstrates the model structure on an updated, curated dataset with Russian data excluded by default.
 
-<!-- This repository contains the code used to calculate compiled survey indices for beaked and golden redfish in the Norwegian and Barents Seas, as presented in the paper. The workflow demonstrated here can be extended to other stocks using survey data from the Institute of Marine Research and beyond. The contents represent a lightly adapted version of the files used in the original analysis. The repository may be updated over time to incorporate new data or correct errors. It therefore serves both as a reproducible reference for the published method and a public platform for its ongoing development. 
+## Data
 
-To recompile data, run the scripts in the docs/data folder first. Output of these scripts is located in the data folder, and hence recompilation of data is not required to compile the scripts. 
+The public analysis starts from sanitized station-level files in `data/public/`. A matching public dataset is intended to be available from NMDC: <https://doi.org/10.21335/NMDC-999805712>.
 
--->
+When `data/survey data/Compiled_redfish_survey_data.rda` is present, the public-prep step uses that compiled survey source directly before applying the spatial public filter.
+
+Russian data are excluded by default using:
+
+- a study-area polygon stored at `data/gis/study area.gpkg`,
+- a Russian EEZ polygon stored at `data/gis/russian_eez.shp`.
+
+IMR users who are allowed to work with the restricted data can rerun the pipeline with `INCLUDE_RUSSIAN_DATA=true`. This switch is intentionally opt-in.
+
+## Run
+
+Install dependencies from `renv.lock` when available, then run:
+
+```r
+source("run_analysis.R")
+```
+
+The default model run is a quick, rerunnable showcase. To attempt the larger model fit, set `SMOKE_TEST=false`.
+
+For IMR-internal data refreshes, set the path to a local BioticExplorerServer DuckDB database before running:
+
+```sh
+export UPDATE_BES=true
+export BES_DATABASE_PATH="paste your BES database path here"
+```
+
+The local DuckDB path is deliberately not stored in the repository.
+
+## Outputs
+
+The workflow writes:
+
+- sanitized station data to `data/public/`,
+- sanitized length data unless `INCLUDE_LENGTH_DATA=false`,
+- a cruise summary with an automatically updated `included` column,
+- a filtered station map to `figures/`,
+- duplicate and exclusion review tables,
+- showcase model outputs under `output/`.
+
+`review/` and `output/` are local QA products and are ignored by Git unless explicitly reviewed for public release.
+
+Legacy manuscript and SI helpers live under `R/legacy/`. They support the local `docs/` workflows but are not part of the minimal public showcase path.
