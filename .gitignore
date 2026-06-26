@@ -11,13 +11,9 @@
 .Rproj.user/
 .vscode/
 .cache-home/
-.DS_Store
-**/.DS_Store
 
 # Legacy private/reconstruction material kept locally for reference.
-docs/
 R/scripts/
-R/presentation_title_slide_xkcd_graph.R
 
 # Raw/private or bulky data products. Public reproducibility data live in
 # data/public/.
@@ -36,3 +32,8 @@ output/
 *.html
 *.pdf
 *.docx
+
+# Keep .DS_Store ignored everywhere, including under the data/ negations above.
+**/.DS_Store
+
+# Retain docs
