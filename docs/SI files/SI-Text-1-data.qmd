@@ -91,8 +91,8 @@ invisible(lapply(packages, library, character.only = TRUE))
 ################### ###
 # Custom functions ----
 
-source("R/legacy/make_table.R") # a function to make tables
-source("R/legacy/bubble_map.R")
+source("R/make_table.R") # a function to make tables
+source("R/bubble_map.R")
 
 ## Gear list
 gearList <- read_rds('data/definitions/imr_gearlist.rds')
