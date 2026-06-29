@@ -1,0 +1,2613 @@
+---
+title: "SI Text 5: Bottom temperature modelling"
+subtitle: ""
+date: today
+published-title: "Version"
+bibliography: "../manuscript/zotero_library.bib"
+csl: "../manuscript/ices_jms.csl"
+format:
+  html:
+    self-contained: true
+    fig-width: 9
+    fig-height: 4
+    code-fold: true
+    output-file: SI-Text-5-bottom-temperature
+    toc: true
+   # pdf:
+   #  fig-width: 6.69
+   #  fig-height: 5
+   #  fig-dpi: 96
+   #  fig-format: png
+   #  output-file: SI-Text-7-bottom-temperature
+execute:
+  message: false
+  warning: false
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, eval = TRUE, include = FALSE}
+
+knitr::opts_knit$set(root.dir = '../../')
+
+knitr::knit_hooks$set(
+  timeit = local({
+    now <- NULL
+    function(before, options) {
+      if (before) {
+        now <<- Sys.time()
+      } else {
+        res <- round(difftime(Sys.time(), now, units = "mins"), 1)
+        now <<- NULL
+        # use options$label if you want the chunk label as well
+        print(paste('Time:', as.character(res), "min"))
+      }
+    }
+  })
+)
+```
+
+```{r packages, timeit = TRUE}
+# Clear the workspace for manual code runs
+
+rm(list = ls())
+
+############## ####
+#### Libraries ----
+
+## Package names
+packages <- c(
+  "tidyverse",
+  "sf",
+  "ggOceanMaps",
+  "ggspatial",
+  "sdmTMB",
+  "ggeffects",
+  "scales",
+  "concaveman",
+  "plotly",
+  "data.table",
+  "dtplyr",
+  "remotes",
+  "sdmTMBextra",
+  "lubridate",
+  "inlabru",
+  "tidync"
+)
+
+## Install packages not yet installed
+installed_packages <- packages %in% rownames(installed.packages())
+
+if ("remotes" %in% packages[!installed_packages]) {
+  install.packages("remotes")
+}
+
+if (any(installed_packages == FALSE)) {
+  if ("sdmTMBextra" %in% packages[!installed_packages]) {
+    remotes::install_github(
+      "pbs-assess/sdmTMBextra",
+      dependencies = TRUE,
+      upgrade = "never"
+    )
+  }
+
+  installed_packages <- packages %in% rownames(installed.packages())
+
+  install.packages(packages[!installed_packages])
+}
+
+## Load packages
+invisible(lapply(packages, function(x) {
+  suppressPackageStartupMessages(library(x, character.only = TRUE))
+}))
+
+# Backend for parallel
+
+if (Sys.info()["sysname"] == "Linux") {
+  library(flexiblas)
+  flexiblas_switch(flexiblas_load_backend("OPENBLAS-THREADS"))
+}
+
+################### ###
+# Custom functions ----
+
+source("R/legacy/make_table.R") # a function to make tables
+source("R/legacy/bubble_map.R")
+
+################ ##
+# ggplot theme ----
+
+theme_cust <- theme_classic(base_size = 10) %+replace%
+  theme(
+    strip.background = element_blank(),
+    panel.background = element_blank(),
+    plot.background = element_blank(),
+    legend.background = element_blank(),
+    legend.box.background = element_blank(),
+    plot.margin = margin(5.5, 10, 5.5, 5.5)
+  )
+
+theme_set(theme_cust) # Set default theme globally for the entire project
+```
+
+<details>
+<summary>Unfold to see R package versions and system information used to generate the document</summary>
+```{r}
+#| label: sys-info
+sessionInfo()
+```
+</details>
+
+This is a supplementary information file for @vihtakari2026 providing reproducible documentation on calculation of the bottom temperature indices using generalized linear mixed effects models fitted with the [sdmTMB package](https://CRAN.R-project.org/package=sdmTMB) [@sdmTMB] for R [@rcoreteam]. The document is written using [Quarto](https://quarto.org/) and can be compiled within the [GitHub repository](https://github.com/DeepWaterIMR/ref-index-paper) for the project. HTML version of this document contains foldable code fields showing the code used to compile the model. 
+
+# Data
+
+```{r data, timeit = TRUE}
+# Settings
+
+recompile_model <- TRUE # switch to compile the model. If FALSE, the model is loaded from the data/model_output folder.
+
+overview_plots <- TRUE # switch to include overview plots. Increases file size
+run_fixef <- TRUE # switch to make fixed effect plots.
+recalculate_index <- TRUE # switch to recalculate the indices
+run_regional <- TRUE # switch to compute regional indices.
+recalculate_regional_index <- TRUE # switch to recalculate the indices
+run_cog <- FALSE # switch to compute center of gravity and make associated plots.
+
+marginal_effects <- FALSE # switch to plot marginal fixed effects through ggeffect (quicker) instead of conditional effects (slower). Marginal effects do not work for hurdle/delta models.
+length_based <- FALSE
+
+## Response variable
+response_variable <- "bottom temperature" # options: "bottom temperature"
+sp_name <- response_variable
+model_name <- ""
+
+## Model family (use this to set the family)
+model_family <- student(df = 10)
+model_family_name <- ifelse(
+  is.null(model_family$clean_name),
+  model_family$family,
+  model_family$clean_name
+)
+
+## Threshold for automatic outlier removal
+outlier_threshold <- NA # 0.9999 # Proportion (as used in the quantile() function). Set to NA to disable outlier removal.
+
+## Method for calculating Q-Q plots
+residual_method <- "mle-mvn" # "mle-mvn" for fixed effect at their Maximum Likelihood Estimates assuming multivariate normal distribution (quick); "mle-mcmc" for fixed effects at their MLEs random effects with MCMC (very slow); "simulate" for simulation-based randomized quantile residuals (semi-quick). See https://pbs-assess.github.io/sdmTMB/articles/residual-checking.html
+
+## Mesh cutoff argument (smaller values create meshes with more knots)
+mesh_cutoff <- 50 # Minimum distance between knots before a new mesh vertex is added in kilometers
+max_data_depth <- 2000 # Max depth for data in meters to be used in figures
+
+## Prediction grid cell side length
+grid_side_size <- 10 # kilometers due to UTM projection and division by 1000
+max_prediction_depth <- 1000 # Max depth for predictions
+
+####################
+# Read the data ----
+
+# Get file information and sort by modification time
+files <- list.files(
+  "data/environment",
+  pattern = "BT_BS_stations",
+  full.names = TRUE
+)
+file_info <- file.info(files)
+newest_file <- files[which.max(file_info$mtime)]
+
+dt <- tidync(newest_file) %>%
+  hyper_tibble() %>%
+  mutate(
+    ecdepth = if_else(ecdepth < 0, NA, ecdepth),
+    BT = if_else(BT < -5, NA, BT),
+    BS = if_else(BS < -5, NA, BS)
+  ) %>%
+  mutate(
+    yday = lubridate::yday(as.Date(paste(year, month, day, sep = "-"))),
+    .after = "day"
+  ) %>%
+  mutate(fmonth = factor(month, levels = 1:12), fyear = factor(year)) %>%
+  filter(!is.na(BT)) %>%
+  rename(
+    "lon" = "long",
+    "depth" = "ecdepth",
+    "value" = "BT"
+  ) %>%
+  filter(depth <= max_data_depth) %>%
+  distinct()
+
+## Outlier removal
+
+if (!is.na(outlier_threshold)) {
+  dt <- dt %>%
+    mutate(
+      outlier = value > quantile(value, outlier_threshold),
+      .after = "value"
+    )
+} else {
+  dt <- dt %>% mutate(outlier = FALSE, .after = "value")
+}
+
+## Remove stations outside the study area
+
+roi <- sf::read_sf("data/gis/study area.gpkg")
+
+tmp <- dt %>%
+  st_as_sf(
+    coords = c("lon", "lat"),
+    crs = 4326
+  ) %>%
+  st_intersects(roi) %>%
+  as.integer() %>%
+  is.na() %>%
+  `!`
+
+dt <- dt[tmp, ]
+
+## CRS
+
+dt_crs <- get_crs(dt, ll_names = c("lon", "lat"))
+
+dt <- sdmTMB::add_utm_columns(dt, ll_names = c("lon", "lat"), utm_crs = dt_crs)
+
+# Response variable type definitions for automatic text
+
+value_name <- "Temperature (°C)"
+value_unit <- "°C"
+value_text_name <- value_name
+value_text_unit <- value_unit
+model_type <- "Temperature"
+
+map_ncol <- 7
+```
+
+The cleaned dataset comprised `r dt %>% filter(!outlier) %>% nrow()` CTD casts collected over `r dt %>% filter(!outlier) %>% distinct(year) %>% nrow()` years, from `r min(dt$year)` to `r max(dt$year)`. `r value_text_name` was used as the response variable. The latest record in the dataset was `r max(as.Date(paste(dt$year, dt$month, dt$day, sep = "-")))`.
+
+## Outlier removal
+
+`r ifelse(is.na(outlier_threshold), "Outlier threshold was set to NA meaning that no automatic outlier removal was conducted", paste0("Outlier threshold was set to ", outlier_threshold, " sample quantile probability leading to removal of ", sum(dt$outlier), " values above ", round(quantile(dt$value, outlier_threshold), 0), " ", value_text_unit))`.
+
+```{r}
+#| label: fig-outlier
+#| fig-height: 4
+#| fig-cap: !expr paste("Distribution of the response variable values.", ifelse(!is.na(outlier_threshold), "Red bars indicate values removed from the analyses as outliers.", "No values were removed as outliers."))
+
+if (overview_plots) {
+  ggplot(dt, aes(value, fill = outlier)) +
+    geom_vline(
+      xintercept = quantile(dt$value, outlier_threshold),
+      color = "grey"
+    ) +
+    geom_histogram() +
+    scale_x_continuous(n.breaks = 10) +
+    # scale_y_continuous(
+    #   trans = "log1p",
+    #   labels = scales::label_log(),
+    #   breaks = 10^seq(-1,6),
+    #   expand = c(0,0)) +
+    # scale_x_continuous(
+    #   trans = "log1p",
+    #   labels = scales::label_log(),
+    #   breaks = c(0,1, 10, 100, 1e3, 1e4, 1e5, 1e6, 1e7),
+    #   expand = c(0,0)
+    # ) +
+    coord_cartesian(
+      #xlim = c(NA, 10^ceiling(max(log10(dt$value)))),
+      expand = FALSE
+    ) +
+    labs(
+      y = "Count",
+      x = value_name,
+      fill = paste0("Outlier\n(", outlier_threshold * 100, " percentile)")
+    ) +
+    scale_fill_manual(values = c(`TRUE` = "#832424", `FALSE` = "grey50"))
+}
+```
+
+## Annual averages
+
+```{r}
+#| label: fig-n-stn
+#| fig-height: 4
+#| fig-cap: "Number of CTD stations with bottom temperature measurement by year"
+
+if (overview_plots) {
+  dt %>%
+    filter(!outlier) %>%
+    group_by(year) %>%
+    reframe(
+      yes = sum(value > 0, na.rm = TRUE),
+      no = sum(value == 0, na.rm = TRUE)
+    ) %>%
+    pivot_longer(cols = c(yes, no)) %>%
+    mutate(name = factor(name, c("no", "yes"))) %>%
+    ggplot(aes(x = year, y = value, fill = name)) +
+    geom_col() +
+    labs(x = "Year", y = "Number of stations", fill = "Contains\nmeasurement") +
+    scale_fill_manual(values = c("yes" = "#66a182", "no" = "grey")) +
+    scale_y_continuous(expand = c(0.01, 0)) +
+    scale_x_continuous(
+      breaks = seq(1980, 2030, 5),
+      labels = substr(seq(1980, 2030, 5), 3, 4),
+      expand = c(0.01, 0)
+    ) +
+    theme(legend.position = "bottom")
+}
+```
+
+```{r}
+#| label: fig-year-dist
+#| fig-height: 4
+#| fig-cap: !expr paste0("Bottom temperature by year. Dots indicate individual CTD measurements. Crossbars indicate mean values and 95% confidence intervals.", ifelse(!is.na(outlier_threshold), " Dark red dots indicate trawl hauls that were deemed outliers by the set criterion and removed from further analyses.", "")) 
+
+if (overview_plots) {
+  dt %>%
+    ggplot(aes(x = year, y = value)) +
+    geom_jitter(aes(color = outlier), size = 0.3) +
+    stat_summary(
+      data = dt %>% filter(!outlier),
+      fun.data = mean_cl_normal,
+      geom = "crossbar",
+      width = .5,
+      color = "blue"
+    ) +
+    labs(x = "Year", y = value_name) +
+    scale_color_manual(values = c(`TRUE` = "#832424", `FALSE` = "grey70")) +
+    scale_x_continuous(
+      breaks = dt %>% pull(year) %>% unique,
+      labels = substr(dt %>% pull(year) %>% unique, 3, 4),
+      expand = c(0.01, 0)
+    ) +
+    scale_y_continuous(
+      n.breaks = 10,
+      expand = c(0.01, 0)
+    ) +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+      legend.position = "none"
+    )
+}
+```
+
+## Depth dependency
+
+```{r}
+#| label: fig-depth-dist
+#| fig-cap: "Bottom temperature distribution by bottom depth. Grey dots represent individual stations. The blue and shading represent loess smoother and standard error for all data."
+#| fig-height: 5
+
+if (overview_plots) {
+  ggplot(data = dt %>% filter(!outlier), aes(x = depth, y = value)) +
+    geom_point(color = "grey", size = 0.3) +
+    geom_smooth(fill = "blue", color = "blue") +
+    labs(x = "Bottom depth (m)", y = value_name) +
+    # scale_y_continuous(
+    #   trans = "log1p",
+    #   breaks = c(0,1,10,100,1e3,5e3,1e4,2.5e4,5e4,1e5,2e5,3e5,5e5,1e6),
+    #   expand = c(0.01,0)) +
+    theme_bw(base_size = 10) +
+    scale_x_continuous(breaks = seq(0, 4000, 200), expand = c(0.01, 0))
+}
+```
+
+## Seasonal dependency 
+
+```{r}
+#| label: fig-seasonal-dist
+#| fig-cap: !expr paste0("Bottom temperature distribution by ordinal date of each CTD measurement (grey dots). The blue and shading represent loess smoother and standard error.")
+#| fig-height: 5
+
+if (overview_plots) {
+  ggplot(
+    data = dt %>% filter(!outlier),
+    aes(x = as.Date(yday, "2023-01-01"), y = value)
+  ) +
+    geom_point(color = "grey", size = 0.3) +
+    geom_smooth(fill = "blue", color = "blue") +
+    labs(x = "Month", y = value_name) +
+    scale_y_continuous(
+      n.breaks = 10,
+      # trans = "log1p",
+      # breaks = c(0,1,10,100,1e3,5e3,1e4,2.5e4,5e4,1e5,2e5,3e5,5e5,1e6),
+      expand = c(0.01, 0)
+    ) +
+    coord_cartesian(
+      ylim = c(0, NA),
+      xlim = as.Date(c("2023-01-01", "2023-12-31"))
+    ) +
+    theme_bw(base_size = 10) +
+    scale_x_date(date_labels = "%b", date_breaks = "1 months", expand = c(0, 0))
+}
+```
+
+## Spatial sampling distribution
+
+```{r}
+#| label: fig-sampling-distribution
+#| fig-height: 11
+#| fig-cap: Sampling station distribution (grey dots) by year together with density contours showing the regions with most dense sampling.
+
+if (overview_plots) {
+  tmp <- dt %>%
+    filter(!outlier) %>%
+    distinct(year, month, day, lon, lat, depth, X, Y) %>%
+    mutate(X = X * 1000, Y = Y * 1000)
+
+  basemap(dt %>% filter(!outlier), crs = dt_crs) +
+    geom_point(data = tmp, aes(x = X, y = Y), size = 0.2, alpha = 0.3) +
+    geom_density_2d(data = tmp, aes(x = X, y = Y)) +
+    facet_wrap(~year, ncol = map_ncol) +
+    theme_cust +
+    theme(axis.title = element_blank())
+}
+```
+
+```{r}
+#| label: fig-cog-sampling
+#| fig-height: 6
+#| fig-cap: Centers of sampling gravity (average longitude and latitude) by year. Labels indicate the last digits for year. Color is scaled to year with older estimates being blue and newer estimates yellow.
+
+if (overview_plots) {
+  tmp2 <- tmp %>%
+    group_by(year) %>%
+    reframe(lon = mean(lon), lat = mean(lat), X = mean(X), Y = mean(Y))
+
+  basemap(
+    tmp2,
+    crs = dt_crs,
+    bathy.style = "rcg",
+    legends = FALSE,
+    base_size = 8,
+    expand.factor = 2
+  ) +
+    ggspatial::geom_spatial_text(
+      data = tmp2,
+      aes(X, Y, label = substr(year, 3, 4), color = year),
+      fontface = 2,
+      crs = dt_crs
+    ) +
+    scale_color_viridis_c() +
+    theme(legend.position = "none")
+}
+```
+
+## Distribution maps
+
+```{r}
+#| label: fig-dist-map
+#| fig-cap: "Spatial distribution of bottom temperatures from station data for each year."
+#| fig-height: 14
+
+if (overview_plots) {
+  legend_rows <- 1
+
+  color_breaks <-
+    sort(unique(
+      c(
+        0,
+        unname(round_any(
+          quantile(dt$value[dt$value != 0], c(seq(0, 1, 0.25), 0.99, 0.995)),
+          1,
+          floor
+        )),
+        ceiling(max(dt$value))
+      )
+    ))
+  color_breaks <- color_breaks[color_breaks <= (ceiling(max(dt$value)) + 1)]
+
+  dt %>%
+    qmap(color = value, alpha = I(0.4), stroke = I(0.3), size = I(0.8)) +
+    facet_wrap(~year, ncol = map_ncol) +
+    scale_color_viridis_b(
+      breaks = color_breaks,
+      limits = range(color_breaks),
+      show.limits = TRUE
+    ) +
+    labs(
+      color = value_name,
+    ) +
+    guides(
+      color = guide_legend(
+        nrow = legend_rows,
+        byrow = legend_rows > 1,
+        keywidth = 0.01,
+        keyheight = 0.01,
+        default.unit = "inch"
+      ),
+    ) +
+    theme(
+      legend.spacing.x = unit(0.01, 'cm'),
+      legend.spacing.y = unit(0.01, 'cm'),
+      legend.text = element_text(margin = margin(0, 0, 0, 0)),
+      legend.position = "bottom"
+    )
+}
+```
+
+# Model fitting
+
+```{r fit, timeit = recompile_model}
+#| code-fold: true
+#| warning: true
+#| message: true
+
+if (recompile_model) {
+  mesh <- make_mesh(
+    dt %>% filter(!outlier),
+    xy_cols = c("X", "Y"),
+    cutoff = mesh_cutoff
+  )
+
+  ## Uncomment to land barriers to the mesh (only complicate the model without clear improvement on the result)
+  # land_shape <- basemap_data(data = x, crs = dt_crs)$shapefiles$land
+  # mesh <-
+  #   sdmTMBextra::add_barrier_mesh(mesh, land_shape, proj_scaling = 1000)
+
+  mod <- sdmTMB(
+    value ~ 0 + fyear + s(month) + s(depth),
+    data = dt %>%
+      filter(!outlier),
+    mesh = mesh,
+    family = model_family,
+    spatial = "on",
+    # spatiotemporal = 'ar1',
+    time = "year",
+    control = sdmTMBcontrol(newton_loops = 2)
+  )
+
+  fit <- setNames(
+    list(list(
+      mod = mod,
+      mesh = mesh,
+      mesh_n = mesh$mesh$n,
+      mesh_cutoff = mesh_cutoff,
+      crs = dt_crs,
+      length_group = "bottom temperature"
+    )),
+    "bottom_temperature"
+  )
+
+  attributes(fit) <-
+    c(
+      attributes(fit),
+      list(
+        grid_side_size = grid_side_size,
+        response_variable = response_variable,
+        outlier_threshold = outlier_threshold,
+        value_name = value_name,
+        value_unit = value_unit,
+        value_text_name = value_text_name,
+        value_text_unit = value_text_unit
+      )
+    )
+}
+```
+
+## Save/load the model
+
+```{r save-fit}
+if (recompile_model) {
+  if (!dir.exists("data/model_output")) {
+    dir.create("data/model_output")
+  }
+
+  save(
+    fit,
+    file = "data/model_output/temperature-model-fit.rda",
+    compress = "xz"
+  )
+} else {
+  load("data/model_output/temperature-model-fit.rda")
+}
+
+# switch to make shifting between tweedie and hurdle easier
+hurdle_model <- length(fit[[1]]$mod$family$family) > 1
+# switch to make including factor year easier
+
+factor_year <- any(grepl("fyear", as.character(fit[[1]]$mod$formula[[1]])))
+month <- any(grepl("month", as.character(fit[[1]]$mod$formula[[1]])))
+yday <- any(grepl("yday", as.character(fit[[1]]$mod$formula[[1]])))
+
+terms <- as.character(fit[[1]]$mod$formula[[1]])
+terms <- terms[length(terms)]
+terms <- trimws(unlist(strsplit(terms, "\\+")))
+
+smonth <- any(grepl("s\\(month\\)", terms))
+```
+
+# Model specifications
+
+- Type: `r model_type`
+- Response variable: `r value_text_name`
+- Formula: `r format(fit[[1]]$mod$formula[[1]])`
+- Model family: `r model_family_name`
+- Hurdle model: `r hurdle_model`
+- Spatiotemporal random fields: `r fit[[1]]$mod$spatiotemporal`
+- Year in formula: `r factor_year`
+- Smoothed month in formula: `r smonth`
+- Number of mesh triangles: `r paste(sapply(fit, function(k) k$mesh_n), collapse = ", ")`
+- Projection: `r as.integer(dt_crs)`
+- Number of years: `r length(unique(fit[[1]]$mod$data$year))`
+- Number of stations: `r paste(unique(sapply(fit, function(k) nrow(k$mod$data))), collapse = ", ")`
+
+```{r sanity, timeit = recompile_model}
+fit_sanity <- lapply(fit, function(k) {
+  sanity(k$mod)
+})
+
+knitr::kable(sapply(fit_sanity, function(k) k), row.names = TRUE)
+```
+
+## Mesh
+
+```{r}
+#| label: fig-mesh
+#| fig-height: 6
+#| fig-cap: "Mesh for the sdmTMB model (black lines) with red dots showing the CTD stations. Size of the dots is scaled temperature."
+
+if (overview_plots) {
+  mesh <- fit[[1]]$mesh
+
+  mesh_crs <- sf::st_crs(dt_crs)
+  mesh_crs <- st_crs(sub("units=m", "units=km", mesh_crs$proj4string))
+
+  basemap(
+    mesh$mesh$loc %>%
+      as.data.frame() %>%
+      mutate(V1 = 1000 * V1, V2 = 1000 * V2) %>%
+      st_as_sf(coords = c("V1", "V2"), crs = dt_crs),
+    crs = mesh_crs,
+    land.col = "#eeeac4",
+    lon.interval = 5
+  ) +
+    geom_point(
+      data = dt,
+      aes(X, Y, size = value),
+      alpha = 0.3,
+      color = "red",
+      shape = 21
+    ) +
+    inlabru::gg(mesh$mesh, edge.color = "black") +
+    coord_sf(
+      datum = st_crs("+proj=utm +zone=33 +datum=WGS84 +units=km +no_defs"),
+      expand = FALSE
+    ) +
+    scale_y_continuous(
+      "Latitude (UTM, km from the equator)",
+      breaks = seq(0, 1e4, 1e3)
+    ) +
+    scale_x_continuous(
+      "Longitude (UTM, km)",
+      breaks = seq(-1e3, 1e4, 5e2)
+    ) +
+    scale_size_area() +
+    theme(legend.position = "none")
+}
+```
+
+## Model output
+
+```{r model-output, collapse=TRUE}
+lapply(fit, function(k) k$mod)
+```
+
+# Residuals
+
+```{r, timeit = recompile_model}
+#| label: fig-resid-qq
+#| fig-height: 6
+#| results: hide
+#| fig-cap: !expr paste0("Quantile-quantile plots for the ", ifelse(hurdle_model & residual_method == "mle-mvn", "binomial (left) and positive (right) models.", "models."))
+
+# set.seed(1)
+
+if (TRUE) {
+  # if(length(fit) == 1) {
+
+  if (residual_method == "mle-mvn") {
+    # 1st example in https://pbs-assess.github.io/sdmTMB/articles/residual-checking.html (fixed effects at their Maximum Likelihood Estimates assuming multivariate normal distribution)
+    set.seed(12)
+    if (hurdle_model) {
+      par(mfrow = c(1, 2))
+    }
+    pbapply::pblapply(seq_along(fit), function(j) {
+      lapply(seq_along(fit[[j]]$mod$family$family), function(i) {
+        rq_res <- residuals(fit[[j]]$mod, type = "mle-mvn", model = i)
+        rq_res <- rq_res[is.finite(rq_res)] # some Inf
+        qqnorm(rq_res, main = fit[[j]]$mod$family$family[i])
+        abline(0, 1)
+      })
+    })
+  } else if (residual_method == "mle-mcmc") {
+    # 2nd example: Monte Carlo Markov Chain random effects
+    samps <- sdmTMBextra::predict_mle_mcmc(
+      fit[[1]]$mod,
+      mcmc_iter = 800,
+      mcmc_warmup = 400
+    )
+
+    mcmc_res <- residuals(fit[[1]]$mod, type = "mle-mcmc", mcmc_samples = samps)
+    qqnorm(mcmc_res)
+    abline(0, 1)
+  } else {
+    # 3rd example: simulation-based randomized quantile residuals
+    s <- simulate(fit[[1]]$mod, nsim = 500, type = "mle-mvn")
+    tmp <- dharma_residuals(s, fit[[1]]$mod, return_DHARMa = TRUE)
+    DHARMa::testResiduals(tmp)
+    rm(tmp)
+  }
+}
+```
+
+# Prediction settings
+
+Prediction grid was created for the model to generate estimates for the study area. 
+
+## Prediction grid
+
+Grid cells were modeled as points but converted to squares with `r grid_side_size` km sides according to the `r as.integer(dt_crs)` projection given as an EPSG code corresponding to the zone `r paste0(substr(as.integer(dt_crs),4,5), "N")` in the Universal Transverse Mercator (UTM) coordinate system.
+
+```{r prediction-grid, timeit = recompile_model}
+#| warning: true
+#| message: false
+#| results: hide
+
+if (recompile_model) {
+  # switch to recompile the prediction grid. If FALSE, data are loaded from a file.
+
+  tmp <- sf::st_read("data/gis/prediction_region.gpkg", quiet = TRUE)
+
+  proj_dt_sf <- tmp %>%
+    st_transform(dt_crs) %>%
+    st_make_grid(
+      cellsize = rep(grid_side_size * 1000, 2),
+      square = TRUE,
+      what = "centers"
+    ) %>%
+    st_sf() %>%
+    st_filter(tmp)
+
+  proj_dt <- proj_dt_sf %>%
+    st_coordinates() %>%
+    as_tibble() %>%
+    mutate(X = X / 1000, Y = Y / 1000)
+
+  # ru (raster user) uses the GEBCO 15 arc-second grid: https://www.gebco.net/data_and_products/gridded_bathymetry_data/
+  # and seems to cause trouble with some systems.
+  # rc uses a downsampled ETOPO 1 degree grid. Works on more systems but less
+  # resolution than ru. Set the switch to FALSE if ru does not work.
+
+  if (TRUE) {
+    # switch to use 15-arcsecond GEBCO grid to acquire depths
+
+    if (is.null(getOption("ggOceanMaps.userpath"))) {
+      # set the path to GEBCO grid
+      options(
+        ggOceanMaps.userpath = "/gpfs/gpfs0/felles/Dyphavsarter/Data fellesressurser/Gebco/gebco_2023/GEBCO_2023.nc"
+      )
+    }
+
+    proj_dt$depth <-
+      proj_dt %>%
+      mutate(X = X * 1000, Y = Y * 1000) %>%
+      st_as_sf(coords = c("X", "Y"), crs = dt_crs) %>%
+      ggOceanMaps::get_depth(
+        bathy.style = "ru",
+        bind = FALSE
+      )
+  } else {
+    # Downsampled ETOPO 1 degree grid
+
+    proj_dt$depth <-
+      proj_dt %>%
+      mutate(X = X * 1000, Y = Y * 1000) %>%
+      st_as_sf(coords = c("X", "Y"), crs = dt_crs) %>%
+      ggOceanMaps::get_depth(
+        bathy.style = "rc",
+        bind = FALSE
+      )
+  }
+
+  proj_dt <- proj_dt %>%
+    filter(!is.na(depth)) %>%
+    filter(depth >= 1 & depth <= max_prediction_depth) %>%
+    replicate_df("year", unique(dt$year)) %>%
+    mutate(fyear = as.factor(year))
+
+  if (month) {
+    if (smonth) {
+      proj_dt <- proj_dt %>% replicate_df("month", 9)
+    } else {
+      proj_dt <- proj_dt %>% replicate_df("fmonth", factor(9))
+    }
+  }
+
+  if (yday) {
+    proj_dt <- proj_dt %>% replicate_df("yday", 245)
+  }
+
+  attributes(proj_dt)$grid_side_size <- grid_side_size
+  attributes(proj_dt)$crs <- dt_crs
+
+  saveRDS(
+    proj_dt,
+    file = "data/model_output/temperature-prediction-grid-data.rds",
+    compress = "xz"
+  )
+} else {
+  proj_dt <- read_rds("data/model_output/temperature-prediction-grid-data.rds")
+}
+```
+
+The resulting grid contained `r proj_dt %>% dplyr::select(X, Y) %>% distinct() %>% nrow()` points (@fig-pred-grid). Depths for these points were obtained from the [GEBCO 15 arcsecond bathymetry grid](https://www.gebco.net/data_and_products/gridded_bathymetry_data/) with the help of the [ggOceanMaps](https://mikkovihtakari.github.io/ggOceanMaps/reference/get_depth.html) package.
+
+```{r}
+#| label: fig-pred-grid
+#| fig-height: 8
+#| fig-cap: "Predition grid for the sdmTMB model. The actual UTM coordinates for the model grid have been divided by 1000 to help the model converge. Color of the points refers to the bottom depth category obtained from the ETOPO 15 arcsecond bathymetry grid. Actual bottom depth estimates are continuous."
+
+breaks <- seq(
+  round_any(min(proj_dt$depth), 10, floor),
+  round_any(max(proj_dt$depth), 10, ceiling),
+  100
+)
+
+basemap(dt %>% filter(!outlier)) + # land.col = "#eeeac4", land.border.col = NA
+  geom_sf(
+    data = proj_dt %>%
+      dplyr::select(X, Y, depth) %>%
+      distinct() %>%
+      mutate(X = X * 1e3, Y = Y * 1e3) %>%
+      st_as_sf(
+        coords = c("X", "Y"),
+        crs = suppressWarnings(dt_crs)
+      ),
+    aes(color = depth),
+    shape = 15,
+    size = 0.08 * grid_side_size
+  ) +
+  labs(color = "Depth (m)") +
+  scale_size(range = c(6, 6)) +
+  binned_scale(
+    aesthetics = "color",
+    scale_name = "stepsn",
+    palette = function(x) {
+      viridis::viridis_pal(option = "turbo")(length(breaks) + 1)
+    },
+    limits = c(min(breaks), max(breaks)),
+    # guide = guide_bins(size = 10),
+    breaks = breaks,
+    show.limits = TRUE
+  ) # +
+# theme(legend.key.size = unit(20, "mm"))
+# +
+# guides(color = guide_legend(override.aes = list(size = 10)))
+```
+
+## Predict
+
+```{r predict, timeit = recompile_model}
+mod_pred <- pbapply::pblapply(fit, function(k) {
+  predict(
+    k$mod,
+    newdata = proj_dt,
+    type = "response",
+    model = NA,
+    return_tmb_object = TRUE
+  )
+})
+```
+
+```{r, timeit = recompile_model}
+#| label: fig-pred-scatter
+#| fig-height: !expr 4*ceiling(length(fit)/2)
+#| fig-cap: "Observed swept area density estimates compared to averaged model simulations over 100 repetitions using the model for positions with data. A) Regression between observed and average simulated response variables. Dashed and blue lines indicate the line of equality and an average regression model, respectively. Average regression parameters, together with their 95% confidence intervals (CIs), are given under the length group title. '0 prob' means the proportion of simulations where a zero observation was zero. B) Difference between simulated and observed values for trawl stations: black dots indicate average values, error bars represent 95% CIs, and grey horizontal lines indicate zero. If the error bars do not cross the zero line, the difference is significant. C) Proportion of trawl stations with no target species. Average values simulated from the models are indicated as black dots, with 95% CIs as error bars. Grey horizontal lines indicate the observed values with all years combined."
+
+if (TRUE) {
+  dat_pred <- pbapply::pblapply(fit, function(k) {
+    tmp <- simulate(k$mod, nsim = 100, model = NA)
+
+    out <- tibble(
+      example_sim = tmp[, 1],
+      mean_sim = rowMeans(tmp),
+      sd_sim = apply(tmp, 1, sd),
+      pr_zero = apply(tmp, 1, function(g) sum(g == 0)) / ncol(tmp)
+    ) %>%
+      mutate(cv_sim = sd_sim / mean_sim, .after = "sd_sim") %>%
+      mutate(value = k$mod$data$value, .before = 1)
+
+    cf <- lapply(1:ncol(tmp), function(i) {
+      moo <- summary(lm(tmp[, i] ~ k$mod$data$value))
+      tibble(
+        intercept = coef(moo)[1, 1],
+        slope = coef(moo)[2, 1],
+        r2 = moo$r.squared
+      )
+    }) %>%
+      bind_rows() %>%
+      reframe(
+        int_mean = mean(intercept),
+        int_sd = sd(intercept),
+        int_min = quantile(intercept, 0.025),
+        int_max = quantile(intercept, 0.975),
+        slp_mean = mean(slope),
+        slp_sd = sd(slope),
+        slp_min = quantile(slope, 0.025),
+        slp_max = quantile(slope, 0.975),
+        r2_mean = mean(r2),
+        r2_sd = sd(r2),
+        r2_min = quantile(r2, 0.025),
+        r2_max = quantile(r2, 0.975)
+      ) %>%
+      bind_cols(
+        out %>%
+          filter(value == 0) %>%
+          reframe(
+            zero_mean = mean(pr_zero),
+            zero_min = quantile(pr_zero, 0.025),
+            zero_max = quantile(pr_zero, 0.975)
+          )
+      ) %>%
+      mutate(zero_obs = mean(k$mod$data$value == 0)) %>%
+      bind_cols(
+        tibble(
+          sim_mean = mean(colMeans(tmp)),
+          sim_sd = sd(colMeans(tmp)),
+          sim_min = quantile(colMeans(tmp), 0.025),
+          sim_max = quantile(colMeans(tmp), 0.975),
+          obs_mean = mean(out$value),
+          res_mean = mean(colMeans(tmp - k$mod$data$value)),
+          res_min = quantile(colMeans(tmp - k$mod$data$value), 0.025),
+          res_max = quantile(colMeans(tmp - k$mod$data$value), 0.975),
+        )
+      )
+
+    list(dt = out, coef = cf)
+  })
+
+  cowplot::plot_grid(
+    plotlist = lapply(seq_along(dat_pred), function(i) {
+      cowplot::plot_grid(
+        ggplot(dat_pred[[i]]$dt, aes(x = value, y = mean_sim)) +
+          geom_abline(intercept = 0, slope = 1, linetype = 2) +
+          geom_point(shape = 21, alpha = 0.3) +
+          geom_abline(
+            intercept = dat_pred[[i]]$coef$int_mean,
+            slope = dat_pred[[i]]$coef$slp_mean,
+            color = "blue"
+          ) +
+          annotate(
+            "text",
+            x = -Inf,
+            y = Inf,
+            label = paste0(
+              "R2 = ",
+              round(dat_pred[[i]]$coef$r2_mean, 2),
+              " (",
+              round(dat_pred[[i]]$coef$r2_min, 2),
+              "-",
+              round(dat_pred[[i]]$coef$r2_max, 2),
+              ")\nslope = ",
+              round(dat_pred[[i]]$coef$slp_mean, 2),
+              " (",
+              round(dat_pred[[i]]$coef$slp_min, 2),
+              "-",
+              round(dat_pred[[i]]$coef$slp_max, 2)
+            ),
+            vjust = 1,
+            hjust = -0.1
+          ) +
+          labs(
+            x = bquote('Observed response (' * .(value_unit) * ')'),
+            y = bquote('Average simulated response (' * .(value_unit) * ')'),
+            title = names(dat_pred[i])
+          ),
+
+        ggplot(
+          dat_pred[[i]]$coef,
+          aes(x = 1, y = res_mean, ymin = res_min, ymax = res_max)
+        ) +
+          geom_hline(yintercept = 0, color = "grey") +
+          geom_errorbar(width = 0.2) +
+          geom_point() +
+          labs(
+            y = bquote(
+              'Mean simulated - observed (± 95% CIs; ' * .(value_unit) * ')'
+            )
+          ) +
+          scale_x_continuous(expand = c(1, 0)) +
+          theme(
+            axis.title.x = element_blank(),
+            axis.text.x = element_blank(),
+            axis.ticks.x = element_blank()
+          ),
+
+        rel_widths = c(6, 2, 2),
+        align = "h",
+        nrow = 1,
+        labels = "AUTO"
+      )
+    }),
+    ncol = ifelse(length(fit) == 1, 1, 2)
+  )
+}
+```
+
+```{r, timeit = recompile_model}
+#| fig-height: !expr ifelse(length(fit) == 1, 6, 3.5*ceiling(length(fit)/2))
+#| label: fig-pred-hist
+#| fig-cap: "Histograms showing distributions of the log + 1 transformed observed density (A), average simulated density for positions with data (B), and predicted density throughout the predicted model domain (C). Blue lines indicate mean response variable values."
+
+if (TRUE) {
+  cowplot::plot_grid(
+    plotlist = lapply(seq_along(mod_pred), function(i) {
+      if (!is.null(mod_pred[[i]]$data)) {
+        tmp <- mod_pred[[i]]$data %>%
+          mutate(value = est)
+      } else {
+        tmp <- mod_pred[[i]] %>%
+          mutate(value = est)
+      }
+
+      cowplot::plot_grid(
+        ggplot(tmp, aes(x = est)) +
+          geom_histogram() +
+          geom_vline(xintercept = mean(tmp$value), color = "blue") +
+          scale_y_continuous(expand = c(0.01, 0)) +
+          scale_x_continuous(
+            n.breaks = 10,
+            expand = expansion(mult = 0.01)
+          ) +
+          expand_limits(
+            x = c(
+              floor(min(c(
+                tmp$value,
+                dat_pred[[i]]$dt$mean_sim,
+                mod_pred[[i]]$data$est
+              ))),
+              ceiling(max(c(
+                tmp$value,
+                dat_pred[[i]]$dt$mean_sim,
+                mod_pred[[i]]$data$est
+              )))
+            )
+          ) +
+          labs(
+            x = bquote('log(observed response + 1) (' * .(value_unit) * ')')
+          ),
+
+        ggplot(dat_pred[[i]]$dt, aes(x = mean_sim)) +
+          geom_histogram() +
+          geom_vline(
+            xintercept = mean(dat_pred[[i]]$dt$mean_sim),
+            color = "blue"
+          ) +
+          scale_y_continuous(expand = c(0.01, 0)) +
+          scale_x_continuous(
+            n.breaks = 10,
+            expand = expansion(mult = 0.01)
+          ) +
+          expand_limits(
+            x = c(
+              floor(min(c(
+                tmp$value,
+                dat_pred[[i]]$dt$mean_sim,
+                mod_pred[[i]]$data$est
+              ))),
+              ceiling(max(c(
+                tmp$value,
+                dat_pred[[i]]$dt$mean_sim,
+                mod_pred[[i]]$data$est
+              )))
+            )
+          ) +
+          labs(
+            x = bquote(
+              'log(mean simulated response for observations + 1) (' *
+                .(value_unit) *
+                ')'
+            )
+          ),
+
+        ggplot(mod_pred[[i]]$data, aes(x = est)) +
+          geom_histogram() +
+          geom_vline(
+            xintercept = mean(mod_pred[[i]]$data$est),
+            color = "blue"
+          ) +
+          scale_y_continuous(expand = c(0.01, 0)) +
+          scale_x_continuous(
+            n.breaks = 10,
+            expand = expansion(mult = 0.01)
+          ) +
+          expand_limits(
+            x = c(
+              floor(min(c(
+                tmp$value,
+                dat_pred[[i]]$dt$mean_sim,
+                mod_pred[[i]]$data$est
+              ))),
+              ceiling(max(c(
+                tmp$value,
+                dat_pred[[i]]$dt$mean_sim,
+                mod_pred[[i]]$data$est
+              )))
+            )
+          ) +
+          labs(
+            x = bquote(
+              'log(predicted response for model domain + 1) (' *
+                .(value_unit) *
+                ')'
+            )
+          ),
+
+        ncol = 1,
+        labels = "AUTO"
+      )
+    }),
+    labels = names(mod_pred),
+    ncol = ifelse(length(fit) == 1, 1, 2)
+  )
+}
+```
+
+# Model effects
+
+## Fixed effects
+
+```{r, timeit = recompile_model}
+#| label: fig-fixed-effects
+#| fig-height: 6
+#| fig-cap: "Conditional fixed model effects of year (A), month (B), and depth (C). Error bars and shading indicate 95% confidence intervals. The vertical line in C refers to the reference depth used to estimate A and B. A and C have been estimated using September as a reference month. Spatial and spatiotemporal effects are not included to the output."
+
+if (run_fixef) {
+  cowplot::plot_grid(
+    plotlist = lapply(fit, function(k) {
+      if (marginal_effects && !hurdle_model) {
+        ## Marginal effect plot
+
+        fixef <- list()
+        x <- dt %>% filter(!outlier)
+
+        fixef$depth <- ggeffect(k$mod, "depth [1:1400]")
+        fixef[[k$length_group]]$depth$length_group <- k$length_group
+
+        if (factor_year) {
+          fixef[[k$length_group]]$year <- ggeffect(k$mod, "fyear")
+          fixef[[k$length_group]]$year$length_group <- k$length_group
+        }
+
+        if (month) {}
+
+        if (yday) {}
+
+        ### Gear type plot
+
+        tmp <- lapply(fixef, function(k) k$geartype) %>% bind_rows()
+
+        # ymax <- ifelse(max(tmp$conf.high) > 1.1*max(tmp$predicted), 1.1*max(tmp$predicted), ceiling(max(tmp$conf.high)))
+
+        p1 <- tmp %>%
+          ggplot(aes(x = x, y = predicted, ymin = conf.low, ymax = conf.high)) +
+          geom_errorbar(width = 0.2) +
+          geom_point() +
+          scale_y_log10(n.breaks = 8) +
+          labs(y = value_name, x = "Gear type") +
+          theme_bw(base_size = 10) +
+          {
+            if (length_based) facet_wrap(~length_group)
+          } +
+          theme(legend.position = "none")
+
+        ## Depth plot
+
+        tmp <- lapply(fixef, function(k) k$depth) %>% bind_rows()
+
+        ymax <- ifelse(
+          max(tmp$conf.high) > 1.1 * max(tmp$predicted),
+          1.1 * max(tmp$predicted),
+          ceiling(max(tmp$conf.high))
+        )
+
+        p2 <- tmp %>%
+          ggplot(aes(x = x, y = predicted, ymin = conf.low, ymax = conf.high)) +
+          geom_ribbon(alpha = 0.3, color = NA) +
+          geom_path() +
+          coord_cartesian(expand = FALSE, ylim = c(0, ymax)) +
+          theme_bw(base_size = 10) +
+          {
+            if (length_based) facet_wrap(~length_group)
+          } +
+          labs(
+            x = "Depth (m)",
+            y = value_name,
+            color = "Length group (cm)",
+            fill = "Length group (cm)"
+          )
+
+        ## Year plot
+
+        if (factor_year) {
+          tmp <- lapply(fixef, function(k) k$year) %>% bind_rows()
+
+          ymax <- ifelse(
+            max(tmp$conf.high) > 1.1 * max(tmp$predicted),
+            1.1 * max(tmp$predicted),
+            ceiling(max(tmp$conf.high))
+          )
+
+          p3 <- tmp %>%
+            ggplot(aes(
+              x = x,
+              y = predicted,
+              ymin = conf.low,
+              ymax = conf.high
+            )) +
+            geom_path(color = "grey", aes(group = group)) +
+            geom_errorbar(width = 0.2) +
+            geom_point() +
+            scale_y_log10(n.breaks = 8) +
+            scale_x_discrete(
+              breaks = levels(tmp$x),
+              labels = substr(levels(tmp$x), 3, 4)
+            ) +
+            # coord_cartesian(expand = FALSE) +
+            # theme_bw(base_size = 10) +
+            {
+              if (length_based) facet_wrap(~length_group)
+            } +
+            labs(x = "Year", y = value_name, title = k$length_group)
+
+          return({
+            cowplot::plot_grid(
+              p3,
+              cowplot::plot_grid(
+                p1,
+                p2,
+                ncol = 2,
+                labels = c("B", "C"),
+                rel_widths = c(3, 7)
+              ),
+              ncol = 1,
+              labels = c("A", "")
+            )
+          })
+        } else {
+          return({
+            cowplot::plot_grid(
+              p1,
+              p2,
+              ncol = 2,
+              labels = "AUTO",
+              rel_widths = c(3, 7)
+            )
+          })
+        }
+      } else {
+        ## Conditional effect plot
+
+        ### Depth
+
+        tt <- tibble(depth = 1:max_prediction_depth)
+
+        if (month) {
+          tt <- mutate(tt, fmonth = factor(9), month = 9)
+        }
+        if (yday) {
+          tt <- mutate(tt, yday = 245)
+        }
+
+        tt <- tt %>% mutate(year = max(k$mod$data$year), fyear = factor(year))
+
+        tmp <- predict(
+          k$mod,
+          tt,
+          se_fit = TRUE,
+          re_form = NA,
+          model = NA
+        ) %>%
+          mutate(
+            lwr = model_family$linkinv(est - est_se),
+            upr = model_family$linkinv(est + est_se),
+            est = model_family$linkinv(est)
+          )
+
+        ref_depth <- tmp %>%
+          slice(which.max(est)) %>%
+          pull(depth)
+
+        ymax <- ifelse(
+          max(tmp$upr) > 2 * max(tmp$est),
+          2 * max(tmp$est),
+          ceiling(max(tmp$upr))
+        )
+
+        p_depth <- tmp %>%
+          ggplot(aes(x = depth, y = est, ymin = lwr, ymax = upr)) +
+          geom_vline(xintercept = ref_depth) +
+          geom_ribbon(alpha = 0.3, color = NA) +
+          geom_path() +
+          coord_cartesian(expand = FALSE, ylim = c(0, ymax)) +
+          labs(
+            y = value_name,
+            x = "Depth (m)",
+            color = "Gear type",
+            fill = "Gear type"
+          ) +
+          theme_bw(base_size = 10) +
+          theme(
+            legend.position = c(0.1, 0.8),
+            strip.background = element_blank(),
+            panel.background = element_blank(),
+            plot.background = element_blank(),
+            legend.background = element_blank(),
+            legend.box.background = element_blank(),
+            plot.margin = margin(c(5.5, 10, 5.5, 5.5))
+          )
+
+        ### Year
+
+        tmp <- predict(
+          k$mod,
+          tibble(depth = ref_depth) %>%
+            replicate_df(., "year", unique(k$mod$data$year)) %>%
+            {
+              if (month & smonth) {
+                replicate_df(., "month", sort(unique(k$mod$data$month)))
+              } else {
+                .
+              }
+            } %>%
+            {
+              if (month & !smonth) {
+                replicate_df(., "fmonth", sort(unique(k$mod$data$month)))
+              } else {
+                .
+              }
+            } %>%
+            {
+              if (yday && factor_year) mutate(., yday = 245) else .
+            } %>%
+            mutate(fyear = factor(year)),
+          se_fit = TRUE,
+          re_form = NA,
+          model = NA
+        ) %>%
+          mutate(
+            lwr = model_family$linkinv(est - est_se),
+            upr = model_family$linkinv(est + est_se),
+            est = model_family$linkinv(est)
+          ) %>%
+          arrange(year)
+
+        if (factor_year) {
+          p_year <- tmp %>%
+            {
+              if (month & smonth) filter(., month == 9) else .
+            } %>%
+            {
+              if (month & !smonth) filter(., fmonth == 9) else .
+            } %>%
+            ggplot(
+              aes(x = year, y = est, ymin = lwr, ymax = upr)
+            ) +
+            geom_path() +
+            geom_errorbar(width = 0.2) +
+            geom_point() +
+            scale_y_log10(n.breaks = 8, expand = expansion(mult = 0.03)) +
+            scale_x_continuous(
+              breaks = seq(1980, 2030, 4),
+              labels = substr(seq(1980, 2030, 4), 3, 4),
+              expand = expansion(mult = 0.03)
+            ) +
+            # coord_cartesian(expand = FALSE) +
+            theme_bw(base_size = 10) +
+            labs(x = "Year", y = value_name, title = k$length_group) +
+            theme(legend.position = "none")
+        }
+
+        ### Month
+
+        if (month & !smonth) {
+          p_month <- tmp %>%
+            filter(year == max(year)) %>%
+            ggplot(
+              aes(x = fmonth, y = est, ymin = lwr, ymax = upr)
+            ) +
+            geom_path() +
+            geom_errorbar(width = 0.2) +
+            geom_point() +
+            scale_y_continuous(
+              n.breaks = 8,
+              expand = expansion(mult = 0.01)
+            ) +
+            scale_x_discrete(breaks = 1:12, expand = expansion(mult = 0.05)) +
+            # coord_cartesian(expand = FALSE) +
+            # theme_bw(base_size = 10) +
+            labs(x = "Month", y = value_name) +
+            theme(legend.position = "none")
+        }
+
+        if (month & smonth) {
+          p_month <- tmp %>%
+            filter(year == max(year)) %>%
+            ggplot(
+              aes(x = month, y = est, ymin = lwr, ymax = upr)
+            ) +
+            geom_ribbon(fill = "grey", color = NA) +
+            geom_path() +
+            geom_point() +
+            scale_y_continuous(
+              n.breaks = 8,
+              expand = expansion(mult = 0.01)
+            ) +
+            scale_x_continuous(breaks = 1:12, expand = expansion(mult = 0.05)) +
+            coord_cartesian(expand = FALSE) +
+            # theme_bw(base_size = 10) +
+            labs(x = "Month", y = value_name) +
+            theme(legend.position = "none")
+        }
+
+        ### Day of the year
+
+        if (yday) {
+          tmp2 <- predict(
+            k$mod,
+            tibble(depth = ref_depth) %>%
+              mutate(year = max(k$mod$data$year)) %>%
+              replicate_df(., "yday", 1:365) %>%
+              mutate(fyear = factor(year)),
+            se_fit = TRUE,
+            re_form = NA,
+            model = NA
+          ) %>%
+            mutate(
+              lwr = model_family$linkinv(est - est_se),
+              upr = model_family$linkinv(est + est_se),
+              est = model_family$linkinv(est)
+            )
+
+          ymax <- ifelse(
+            max(tmp2$upr) > 2 * max(tmp2$est),
+            2 * max(tmp2$est),
+            ceiling(max(tmp2$upr))
+          )
+
+          p_yday <- tmp2 %>%
+            ggplot(aes(x = yday, y = est, ymin = lwr, ymax = upr)) +
+            geom_vline(xintercept = ref_depth) +
+            geom_ribbon(alpha = 0.3, color = NA) +
+            geom_path() +
+            coord_cartesian(
+              expand = FALSE,
+              ylim = c(0, ymax),
+              xlim = c(0, 365)
+            ) +
+            labs(
+              y = value_name,
+              x = "Day of year",
+              color = "Gear type",
+              fill = "Gear type"
+            ) +
+            theme_bw(base_size = 10) +
+            theme(
+              legend.position = "none",
+              strip.background = element_blank(),
+              panel.background = element_blank(),
+              plot.background = element_blank(),
+              legend.background = element_blank(),
+              legend.box.background = element_blank(),
+              plot.margin = margin(c(5.5, 10, 5.5, 5.5))
+            )
+        }
+
+        ## Return main plot
+
+        plots <- grep("^p_", ls(), value = TRUE)
+
+        if ("p_year" %in% plots) {
+          plots <- c(
+            "p_year",
+            plots[!plots %in% c("p_year", "p_depth")],
+            "p_depth"
+          )
+        } else {
+          plots <- c("p_depth", plots[!plots %in% c("p_depth")])
+        }
+
+        if (length(plots) == 2) {
+          return({
+            cowplot::plot_grid(
+              get(plots[1]),
+              get(plots[2]) + ylab(NULL),
+              ncol = 2,
+              labels = c("A", "B"),
+              rel_widths = c(2, 2)
+            )
+          })
+        } else if (length(plots) == 3) {
+          return({
+            cowplot::plot_grid(
+              get(plots[1]),
+              cowplot::plot_grid(
+                get(plots[2]),
+                get(plots[3]) + ylab(NULL),
+                ncol = 2,
+                labels = c("B", "C"),
+                rel_widths = c(2, 2)
+              ),
+              ncol = 1,
+              labels = c("A", "")
+            )
+          })
+        } else if (length(plots) == 4) {
+          return({
+            cowplot::plot_grid(
+              get(plots[1]),
+              cowplot::plot_grid(
+                get(plots[2]),
+                get(plots[3]) + ylab(NULL),
+                get(plots[4]) + ylab(NULL),
+                ncol = 3,
+                labels = c("B", "C", "D"),
+                rel_widths = c(2, 4, 4)
+              ),
+              ncol = 1,
+              labels = c("A", "")
+            )
+          })
+        } else {
+          ggplot() +
+            geom_blank() +
+            annotate(
+              "text",
+              0,
+              0,
+              label = "Fixed effect plot combination not programmed"
+            )
+        }
+      }
+    }),
+    ncol = 1
+  )
+}
+```
+
+
+```{r, timeit = recompile_model}
+#| label: fig-simulated-effects
+#| fig-height: 6
+#| fig-cap: Marginal fixed effects of year (A), gear type (B), month (C), and depth (D) for observed and simulated data. Values for each fixed effect are simple averages over all data ignoring the other variables. Data type is indicated with color. Shading and error bars indicate confidence intervals. Simulated data are a result of 100 repetitions. Spatial and spatiotemporal effects are included to the results.
+
+if (run_fixef) {
+  # turn off the plot using this switch
+
+  cowplot::plot_grid(
+    plotlist = lapply(fit, function(k) {
+      tmp <- simulate(k$mod, nsim = 100, model = NA) %>%
+        as.data.frame()
+
+      colnames(tmp) <- paste0("sim", 1:ncol(tmp))
+
+      tmp <- bind_cols(
+        year = k$mod$data$year,
+        depth = k$mod$data$depth,
+        month = if (smonth) k$mod$data$month else k$mod$data$fmonth,
+        yday = k$mod$data$yday,
+        tmp
+      )
+
+      ## Year
+
+      x <- tmp %>%
+        dplyr::select(-month, -depth, -yday) %>%
+        pivot_longer(cols = c(-year)) %>%
+        group_by(year, name) %>%
+        reframe(value = mean(value)) %>%
+        group_by(year) %>%
+        reframe(
+          mean = mean(value),
+          sd = sd(value),
+          n = n(),
+          lwr = mean - 1.96 * sd, # quantile(value,0.025),
+          upr = mean + 1.96 * sd #quantile(value,0.975)
+        ) %>%
+        mutate(type = "Simulated") %>%
+        bind_rows(
+          k$mod$data %>%
+            group_by(year) %>%
+            reframe(
+              mean = mean(value),
+              sd = sd(value),
+              n = n(),
+              lwr = mean - 1.96 * (sd / sqrt(n)),
+              upr = mean + 1.96 * (sd / sqrt(n))
+            ) %>%
+            mutate(type = "Observed")
+        )
+
+      p_year <- x %>%
+        ggplot(aes(
+          x = year,
+          y = mean,
+          ymin = lwr,
+          ymax = upr,
+          shape = type,
+          color = type,
+          fill = type
+        )) +
+        geom_ribbon(color = NA, alpha = 0.3) +
+        geom_path(linewidth = 1) +
+        scale_color_manual(values = c("#f7cb15", "#878e88")) +
+        scale_fill_manual(values = c("#f7cb15", "#878e88")) +
+        # geom_errorbar(width = 0.2, position = position_dodge(0.3)) +
+        geom_point(size = 2) +
+        labs(
+          x = "Year",
+          y = value_name,
+          title = k$length_group,
+          shape = "Data",
+          linetype = "Data"
+        ) +
+        coord_cartesian(ylim = c(0, NA)) +
+        scale_x_continuous(
+          breaks = seq(1980, 2030, 4),
+          labels = substr(seq(1980, 2030, 4), 3, 4),
+          expand = expansion(mult = c(0.01, 0.01))
+        ) +
+        theme(
+          legend.position = "none",
+          strip.background = element_blank(),
+          panel.background = element_blank(),
+          plot.background = element_blank(),
+          legend.background = element_blank(),
+          legend.box.background = element_blank(),
+          plot.margin = margin(c(5.5, 1, 5.5, 1))
+        )
+
+      ## Month
+
+      x <- tmp %>%
+        dplyr::select(-year, -depth, -yday) %>%
+        pivot_longer(cols = c(-month)) %>%
+        group_by(month, name) %>%
+        reframe(value = mean(value)) %>%
+        group_by(month) %>%
+        reframe(
+          mean = mean(value),
+          sd = sd(value),
+          n = n(),
+          lwr = mean - 1.96 * sd, # quantile(value,0.025),
+          upr = mean + 1.96 * sd #quantile(value,0.975)
+        ) %>%
+        mutate(type = "Simulated") %>%
+        bind_rows(
+          k$mod$data %>%
+            group_by(month) %>%
+            reframe(
+              mean = mean(value),
+              sd = sd(value),
+              n = n(),
+              lwr = mean - 1.96 * (sd / sqrt(n)),
+              upr = mean + 1.96 * (sd / sqrt(n))
+            ) %>%
+            mutate(type = "Observed")
+        )
+
+      p_month <- x %>%
+        ggplot(aes(
+          x = month,
+          y = mean,
+          ymin = lwr,
+          ymax = upr,
+          color = type,
+          fill = type,
+          shape = type,
+          group = type
+        )) +
+        geom_ribbon(color = NA, alpha = 0.5) +
+        geom_path(linewidth = 1) +
+        geom_point(size = 2) +
+        labs(
+          y = value_name,
+          x = "Month",
+          color = "Data",
+          shape = "Data",
+          fill = "Data"
+        ) +
+        scale_color_manual(values = c("#f7cb15", "#878e88")) +
+        scale_fill_manual(values = c("#f7cb15", "#878e88")) +
+        coord_cartesian(ylim = c(0, NA)) +
+        theme(
+          legend.position = "none",
+          strip.background = element_blank(),
+          panel.background = element_blank(),
+          plot.background = element_blank(),
+          legend.background = element_blank(),
+          legend.box.background = element_blank(),
+          plot.margin = margin(c(5.5, 1, 5.5, 1))
+        )
+
+      ## Yday
+
+      x <- tmp %>%
+        dplyr::select(-year, -depth, -month) %>%
+        pivot_longer(cols = c(-yday)) %>%
+        group_by(yday, name) %>%
+        reframe(value = mean(value)) %>%
+        group_by(yday) %>%
+        reframe(
+          mean = mean(value),
+          sd = sd(value),
+          n = n(),
+          lwr = mean - 1.96 * sd, # quantile(value,0.025),
+          upr = mean + 1.96 * sd #quantile(value,0.975)
+        ) %>%
+        mutate(type = "Simulated") %>%
+        bind_rows(
+          k$mod$data %>%
+            group_by(yday) %>%
+            reframe(
+              mean = mean(value),
+              sd = sd(value),
+              n = n(),
+              lwr = mean - 1.96 * (sd / sqrt(n)),
+              upr = mean + 1.96 * (sd / sqrt(n))
+            ) %>%
+            mutate(type = "Observed")
+        )
+
+      p_yday <- x %>%
+        ggplot(
+          aes(
+            x = as.Date(yday, "2023-01-01"),
+            y = mean,
+            ymin = lwr,
+            ymax = upr,
+            color = type,
+            fill = type,
+            shape = type,
+            group = type
+          )
+        ) +
+        geom_ribbon(color = NA, alpha = 0.5) +
+        geom_path(linewidth = 1) +
+        # geom_point(size = 2) +
+        labs(
+          y = value_name,
+          x = "Month",
+          color = "Data",
+          shape = "Data",
+          fill = "Data"
+        ) +
+        scale_color_manual(values = c("#f7cb15", "#878e88")) +
+        scale_fill_manual(values = c("#f7cb15", "#878e88")) +
+        scale_x_date(
+          date_labels = "%b",
+          date_breaks = "1 months",
+          expand = c(0, 0)
+        ) +
+        coord_cartesian(
+          ylim = c(0, NA),
+          xlim = as.Date(c("2023-01-01", "2023-12-31"))
+        ) +
+        theme(
+          legend.position = "none",
+          strip.background = element_blank(),
+          panel.background = element_blank(),
+          plot.background = element_blank(),
+          legend.background = element_blank(),
+          legend.box.background = element_blank(),
+          plot.margin = margin(c(5.5, 1, 5.5, 1))
+        )
+
+      ## Depth
+
+      x <- tmp %>%
+        dplyr::select(-year, -month, -yday) %>%
+        pivot_longer(cols = c(-depth, )) %>%
+        group_by(depth, name) %>%
+        reframe(value = mean(value)) %>%
+        group_by(depth) %>%
+        reframe(
+          mean = mean(value),
+          sd = sd(value),
+          n = n(),
+          lwr = mean - 1.96 * sd, # quantile(value,0.025),
+          upr = mean + 1.96 * sd #quantile(value,0.975)
+        ) %>%
+        mutate(type = "Simulated") %>%
+        bind_rows(
+          k$mod$data %>%
+            group_by(depth) %>%
+            reframe(
+              mean = mean(value),
+              sd = sd(value),
+              n = n(),
+              lwr = mean - 1.96 * (sd / sqrt(n)),
+              upr = mean + 1.96 * (sd / sqrt(n))
+            ) %>%
+            mutate(type = "Observed")
+        )
+
+      p_depth <- x %>%
+        ggplot(aes(
+          x = depth,
+          y = mean,
+          ymin = lwr,
+          ymax = upr,
+          shape = type,
+          color = type,
+          fill = type
+        )) +
+        geom_smooth() +
+        # geom_path(alpha = 0.5) +
+        # geom_errorbar(width = 0.2, position = position_dodge(0.3)) +
+        # geom_point() +
+        labs(
+          y = value_name,
+          x = "Depth (m)",
+          color = "Data",
+          shape = "Data",
+          linetype = "Data",
+          fill = "Data"
+        ) +
+        scale_color_manual(values = c("#f7cb15", "#878e88")) +
+        scale_fill_manual(values = c("#f7cb15", "#878e88")) +
+        coord_cartesian(ylim = c(0, NA)) +
+        theme(
+          legend.position = c(0.9, 0.8),
+          strip.background = element_blank(),
+          panel.background = element_blank(),
+          plot.background = element_blank(),
+          legend.background = element_blank(),
+          legend.box.background = element_blank(),
+          plot.margin = margin(c(5.5, 1, 5.5, 1))
+        )
+
+      ## Compile the plots
+
+      return({
+        cowplot::plot_grid(
+          cowplot::plot_grid(
+            p_year,
+            p_month + ylab(NULL),
+            labels = c("A", "B"),
+            rel_widths = c(6, 4)
+          ),
+          cowplot::plot_grid(
+            p_yday,
+            p_depth + ylab(NULL),
+            labels = c("C", "D")
+          ),
+          ncol = 1
+        )
+      })
+    }),
+    ncol = 1
+  )
+}
+```
+
+## Random effects
+
+```{r}
+#| label: tbl-random-effects
+#| tbl-cap: "Spatial and variance parameters (estimate column) and their 95% confidence intervals for bottom temperature. Model family and link function are given in the family and link columns. Range, sigma_O, sigma_E, rho, and phi in the term column denote the Matérn range (distance at which two points are functionally independent), marginal standard deviation of spatial and spatiotemporal random fields, spatiotemporal AR1 autocorrelation as well as the observation error scale parameter, respectively."
+
+pbapply::pblapply(seq_along(fit), function(j) {
+  lapply(seq_along(fit[[j]]$mod$family$family), function(i) {
+    tidy(fit[[j]]$mod, "ran_pars", conf.int = TRUE, model = i) %>%
+      dplyr::select(-std.error) %>%
+      mutate(
+        family = fit[[j]]$mod$family$family[i],
+        link = fit[[j]]$mod$family$link[i],
+        .before = 1
+      )
+  }) %>%
+    bind_rows()
+}) %>%
+  bind_rows() %>%
+  make_table(digits = 3)
+```
+
+## Spatial random fields
+
+```{r}
+#| label: fig-spatial-effect-map
+#| fig-height: 7
+#| fig-cap: !expr paste0("Spatial random fields (the omega parameter) for the ", ifelse(hurdle_model, "models. Left panels represent the binomial model and right panels the positive component model.", "model."))
+
+cowplot::plot_grid(
+  plotlist = pbapply::pblapply(seq_along(mod_pred), function(i) {
+    tmp <- mod_pred[[i]]$data %>%
+      filter(year == max(year))
+
+    if (!any(grepl("omega", colnames(tmp)))) {
+      return({
+        cowplot::plot_grid(
+          plotlist = lapply(fit[[i]]$mod$family$family, function(k) {
+            ggplot() +
+              geom_blank() +
+              annotate(
+                "text",
+                x = 0,
+                y = 0,
+                label = "No spatial\nrandom fields",
+                size = FS(10)
+              ) +
+              theme_void()
+          })
+        )
+      })
+    }
+
+    tmp <- tmp %>%
+      dplyr::select(matches(c("X", "Y", "omega"), ignore.case = FALSE)) %>%
+      distinct() %>%
+      pivot_longer(c(-X, -Y)) %>%
+      mutate(X = 1000 * X, Y = 1000 * Y) %>%
+      st_as_sf(
+        coords = c("X", "Y"),
+        crs = suppressWarnings(dt_crs),
+        remove = FALSE
+      ) %>%
+      mutate(name = factor(name))
+
+    levels(tmp$name) <- fit[[i]]$mod$family$family
+
+    cowplot::plot_grid(
+      plotlist = lapply(levels(tmp$name), function(k) {
+        if (nrow(tmp %>% filter(name == k)) == 0) {
+          return({
+            ggplot() +
+              geom_blank() +
+              annotate(
+                "text",
+                x = 0,
+                y = 0,
+                label = "No spatial\nrandom fields",
+                size = FS(10)
+              ) +
+              theme_void()
+          })
+        }
+
+        basemap(tmp %>% filter(name == k), crs = dt_crs) +
+          geom_raster(
+            data = tmp %>% filter(name == k) %>% st_drop_geometry(),
+            aes(x = X, y = Y, fill = value)
+          ) +
+          scale_fill_gradient2() +
+          labs(subtitle = k) +
+          theme(
+            legend.position = "bottom",
+            axis.title = element_blank(),
+            axis.text = element_blank()
+          )
+      })
+    )
+  }),
+  labels = names(mod_pred),
+  ncol = ifelse(length(fit) > 2, 2, 1)
+)
+```
+
+# Model results
+
+```{r, timeit = recompile_model}
+#| label: fig-result-map-detail
+#| fig-height: 10
+#| fig-cap:  Modelled bottom temperature averaged over years and fixed effects. 
+
+cowplot::plot_grid(
+  plotlist = pbapply::pblapply(seq_along(mod_pred), function(i) {
+    if (!is.null(mod_pred[[i]]$data)) {
+      tmp <- mod_pred[[i]]$data
+    } else {
+      tmp <- mod_pred[[i]]
+    }
+
+    tmp <- tmp %>%
+      group_by(X, Y) %>%
+      reframe(est = mean(est)) %>%
+      mutate(X = 1000 * X, Y = 1000 * Y) %>%
+      st_as_sf(
+        coords = c("X", "Y"),
+        crs = suppressWarnings(dt_crs),
+        remove = FALSE
+      )
+
+    basemap(tmp, crs = dt_crs, base_size = 10) +
+      geom_raster(
+        data = tmp,
+        aes(x = X, y = Y, fill = est)
+      ) +
+      scale_fill_viridis_c(
+        limits = c(-2, NA),
+        breaks = c(-2, 0, 2, 4, 6, 8)
+        # oob = "squish"
+        # trans = "sqrt",
+        # breaks = trans_breaks("sqrt", function(x) x^2)
+      ) +
+      labs(x = "Latitude", y = "Longitude", fill = value_name) +
+      theme(
+        legend.position = "bottom",
+        strip.background = element_blank(),
+        panel.background = element_blank(),
+        plot.background = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        legend.background = element_blank(),
+        legend.box.background = element_blank(),
+        plot.margin = margin(c(5.5, 10, 5.5, 5.5))
+      )
+  })
+)
+```
+
+```{r, timeit = recompile_model}
+#| label: fig-result-map-year
+#| fig-height: 13
+#| fig-cap: Predicted bottom temperature percent anomaly by year. The values in each grid cell are scaled to a single maximum average value over years in Figure 17. Absolute anomaly percentages have been square-root transformed to make differences more visible in the color scale.
+
+## Data ####
+
+tmp <- pbapply::pblapply(seq_along(mod_pred), function(i) {
+  decadal_means <- mod_pred[[i]]$data %>%
+    mutate(., time = year) %>%
+    group_by(time, X, Y) %>%
+    reframe(est = mean(est)) %>%
+    mutate(X = 1000 * X, Y = 1000 * Y, length_group = names(mod_pred)[i])
+
+  overall_means <- decadal_means %>%
+    group_by(length_group, X, Y) %>%
+    reframe(mean = mean(est))
+
+  total_means <- overall_means %>%
+    group_by(length_group) %>%
+    reframe(total = mean(mean)) %>%
+    pull(total)
+
+  overall_max <- overall_means %>%
+    group_by(length_group) %>%
+    reframe(max = max(mean)) %>%
+    pull(max)
+
+  full_join(decadal_means, overall_means, by = join_by(length_group, X, Y)) %>%
+    mutate(
+      log_anomaly = log10(est) - log10(mean),
+      anomaly = est - mean,
+      pr_anomaly = 100 * (est - mean) / mean,
+      total_pr_anomaly = 100 * (est - mean) / total_means,
+      max_pr_anomaly = 100 * (est - mean) / overall_max
+    ) %>%
+    st_as_sf(
+      coords = c("X", "Y"),
+      crs = suppressWarnings(dt_crs),
+      remove = FALSE
+    )
+})
+
+## Plot ####
+cowplot::plot_grid(
+  plotlist = lapply(seq_along(tmp), function(i) {
+    response <- "max_pr_anomaly"
+    limit_rounding <- 10 # rounding for limits
+    break_rounding <- 5 # rounding for breaks
+
+    limits <- c(
+      floor(quantile(tmp[[i]][[response]], c(0)) / limit_rounding) *
+        limit_rounding,
+      ceiling(quantile(tmp[[i]][[response]], c(1)) / limit_rounding) *
+        limit_rounding
+    )
+
+    breaks <- seq(
+      sign(limits[1]) * sqrt(abs(limits[1])),
+      sqrt(limits[2]),
+      length.out = 6
+    )
+    breaks <- round(sign(breaks) * breaks^2 / break_rounding) * break_rounding
+
+    basemap(tmp[[i]], crs = dt_crs, base_size = 10) +
+      geom_raster(
+        data = tmp[[i]],
+        aes(x = X, y = Y, fill = get(response))
+      ) +
+      scale_fill_gradient2(
+        trans = scales::trans_new(
+          name = "negsqrt",
+          transform = function(x) {
+            if_else(x < 0, -1 * sqrt(abs(x)), sqrt(abs(x)))
+          },
+          inverse = function(x) {
+            if_else(x < 0, -1 * x^2, x^2)
+          }
+        ),
+        breaks = breaks,
+        midpoint = 0,
+        limits = limits
+      ) +
+      labs(
+        x = "Latitude",
+        y = "Longitude",
+        title = unique(tmp[[i]]$length_group),
+        fill = ifelse(
+          response %in% c("pr_anomaly", "total_pr_anomaly", "max_pr_anomaly"),
+          paste0(
+            gsub("(^[[:alpha:]])", "\\U\\1", response_variable, perl = TRUE),
+            "\npercent anomaly"
+          ),
+          expression(atop(
+            Biomass ~ density,
+            paste(
+              "anomaly (kg ",
+              nmi^{
+                -2
+              },
+              ")"
+            )
+          ))
+        )
+        #
+        # expression(paste("Biomass density\nanomaly (kg ", nmi^{-2}, ")"))
+        # expression(atop(Log[10]~density, paste("anomaly (kg ", nmi^{-2}, ")")))
+      ) +
+      facet_wrap(~time, ncol = map_ncol) +
+      theme(
+        legend.position = "bottom",
+        axis.text = element_blank(),
+        axis.title = element_blank(),
+        axis.ticks = element_blank(),
+        strip.background = element_blank(),
+        panel.background = element_blank(),
+        plot.background = element_blank(),
+        legend.background = element_blank(),
+        legend.box.background = element_blank()
+      )
+  }),
+  ncol = 1
+)
+```
+
+
+# Index
+
+```{r index-calculus, timeit = recalculate_index}
+#| warning: false
+
+if (recalculate_index) {
+  if (FALSE) {
+    # simple summed index to avoid crashes. Use this when testing new models.
+
+    index <- pbapply::pblapply(seq_along(mod_pred), function(i) {
+      mod_pred[[i]]$data %>%
+        group_by(year, depth, X, Y) %>%
+        reframe(est = mean(est)) %>%
+        # {if(geartype) filter(., geartype == "Campelen")} %>%
+        # {if(season) filter(., season == "H2")} %>%
+        group_by(year) %>%
+        reframe(
+          Y = weighted.mean(Y, est),
+          X = weighted.mean(X, est),
+          depth = weighted.mean(depth, est),
+          est = mean(est)
+        ) %>%
+        mutate(lwr = NA, upr = NA, cv = NA, se = NA) %>%
+        add_column(length_group = names(mod_pred[i]))
+    })
+  } else if (TRUE) {
+    # alternative to the above with uncertainty. Calculates average values for fixed effects (i.e. marginal effects) unlike the official options below, which use conditional effects.
+    nsim <- 500
+
+    index <- pbapply::pblapply(seq_along(mod_pred), function(i) {
+      # print(i)
+      pt <- predict(
+        fit[[i]]$mod,
+        newdata = proj_dt,
+        nsim = nsim
+      )
+
+      bind_cols(proj_dt, est = as_tibble(pt)) %>%
+        dtplyr::lazy_dt() %>%
+        pivot_longer(cols = starts_with("V")) %>%
+        group_by(year, depth, X, Y, name) %>%
+        mutate(value = model_family$linkinv(value)) %>%
+        summarise(est = mean(value, na.rm = TRUE), .groups = "drop") %>%
+        group_by(year, name) %>%
+        summarise(
+          Y = weighted.mean(Y, est),
+          X = weighted.mean(X, est),
+          depth = weighted.mean(depth, est),
+          value = mean(est),
+          .groups = "drop"
+        ) %>%
+        group_by(year) %>%
+        summarise(
+          est = median(value),
+          lwr = quantile(value, 0.025),
+          upr = quantile(value, 0.975),
+          se = sd(value),
+          X_est = median(X),
+          X_lwr = quantile(X, 0.025),
+          X_upr = quantile(X, 0.975),
+          X_se = sd(X),
+          Y_est = median(Y),
+          Y_lwr = quantile(Y, 0.025),
+          Y_upr = quantile(Y, 0.975),
+          Y_se = sd(Y),
+          depth_est = median(depth),
+          depth_lwr = quantile(depth, 0.025),
+          depth_upr = quantile(depth, 0.975),
+          depth_se = sd(depth),
+          .groups = "drop"
+        ) %>%
+        mutate(cv = se / est, .after = "se") %>%
+        mutate(length_group = names(mod_pred[i]), .before = 1) %>%
+        as_tibble()
+    })
+  } else if (TRUE) {
+    # sdmTMB way uses sums instead of averages (required for temperatures)
+
+    index <- pbapply::pblapply(seq_along(mod_pred), function(i) {
+      get_index(
+        obj = mod_pred[[i]],
+        bias_correct = TRUE,
+        area = 1
+      ) %>%
+        mutate(est = est, lwr = lwr, upr = upr, cv = sqrt(exp(se^2) - 1)) %>%
+        add_column(length_group = names(mod_pred[i]))
+    })
+  } else {
+    # alternative to the TMB index. Takes a long time.
+    nsim <- 100
+
+    index <- pbapply::pblapply(seq_along(mod_pred), function(i) {
+      pt <- predict(
+        fit[[i]]$mod,
+        newdata = proj_dt %>%
+          {
+            if (geartype) filter(., geartype == "Alfredo")
+          } %>%
+          {
+            if (season) filter(., season == "H2")
+          },
+        nsim = nsim
+      )
+
+      if (any(is.na(pt))) {
+        warning(
+          "There were ",
+          sum(is.na(pt)),
+          " NaNs in the predicted densities. These have been replaced by zeros. This may influence the outcome."
+        )
+        pt[is.na(pt)] <- 0
+      }
+
+      #    if(any(pt < 0)) {
+      #   warning("There were ", sum(pt < 0), " negative values in the predicted densities. These have been replaced by zeros. This may influence the outcome.")
+      #   pt[pt < 0] <- 0
+      # }
+
+      get_index_sims(
+        obj = pt,
+        area = rep((grid_side_size / 1.852)^2, nrow(pt))
+      ) %>% # grid cell area in square nautical miles
+        mutate(
+          est = est / 1e6, # convert kg to kilotonnes
+          lwr = lwr / 1e6,
+          upr = upr / 1e6,
+          cv = sqrt(exp(se^2) - 1)
+        ) %>%
+        add_column(length_group = names(fit[i]))
+    })
+  }
+
+  names(index) <- names(mod_pred)
+
+  ## Save
+
+  save(index, file = "data/model_output/temperature-index.rda", compress = "xz")
+} else {
+  load("data/model_output/temperature-index.rda")
+}
+```
+
+## Index figures
+
+```{r}
+#| label: fig-index
+#| fig-height: !expr ifelse(length(fit) == 1, 4, 2.5*ceiling(length(fit)/3))
+#| fig-cap: !expr paste0("Bottom temperature index estimated using spatiotemporal generalized linear mixed effects models with the sdmTMB package (solid line). ", value_text_name, " is used as the response variable", ". The model has ", paste(terms, collapse = ", "), " as fixed effects, uses a mesh with ", fit[[1]]$mesh_n, " triangles, ", model_family_name," model family, and ", fit[[1]]$mod$spatiotemporal, " spatiotemporal random fields. Predictions are made to a grid with ", proj_dt %>% distinct(X,Y) %>% nrow(), " cells with a side of ", grid_side_size, " km. Grey shading indicates 95% confidence intervals. Dots indicate years with survey data.")
+
+tmp <- index %>% bind_rows()
+
+tmp %>%
+  ggplot(aes(year, est)) +
+  {
+    if (any(!is.na(tmp$lwr))) {
+      geom_ribbon(
+        aes(ymin = lwr, ymax = upr),
+        alpha = 0.4,
+        color = NA,
+        fill = "grey"
+      )
+    }
+  } +
+  geom_path() +
+  geom_point(shape = 1) +
+  coord_cartesian(
+    expand = FALSE,
+    ylim = c(NA, 1.2 * max(tmp$est, na.rm = TRUE))
+  ) +
+  scale_x_continuous(
+    breaks = seq(1980, 2030, 4),
+    labels = substr(seq(1980, 2030, 4), 3, 4)
+  ) +
+  expand_limits(y = 0) +
+  labs(
+    x = 'Year',
+    y = value_name
+  ) +
+  theme_bw()
+```
+
+## Regional trends
+
+```{r regional-indices, timeit = recalculate_regional_index}
+#| results: hide
+
+if (run_regional) {
+  if (recalculate_regional_index) {
+    regions <- sf::st_read("data/gis/regions.gpkg", quiet = TRUE) %>%
+      st_transform(4326) %>%
+      mutate(region = gsub(" \\(.*\\)", "", region))
+
+    depths <- c(0, 100, 300, 400, 500, 700, 1000, 1500)
+
+    ## Regional indices
+
+    ### With depth
+
+    regional_depth_indices <-
+      pbapply::pblapply(seq_along(mod_pred), function(i) {
+        mod_pred[[i]]$data %>%
+          dtplyr::lazy_dt() %>%
+          group_by(year, depth, X, Y) %>%
+          summarise(est = mean(est), .groups = "drop") %>%
+          mutate(
+            X = 1000 * X,
+            Y = 1000 * Y,
+            length_group = names(mod_pred)[i]
+          ) %>%
+          as_tibble() %>%
+          st_as_sf(coords = c("X", "Y"), crs = dt_crs) %>%
+          st_transform(4326) %>%
+          bind_cols(st_coordinates(.)) %>%
+          rownames_to_column("id") %>%
+          st_join(regions) %>%
+          filter(!duplicated(id)) %>%
+          mutate(
+            interval = cut(
+              depth,
+              depths,
+              labels = paste(
+                depths[1:(length(depths) - 1)],
+                depths[2:(length(depths))],
+                sep = "-"
+              )
+            )
+          ) %>%
+          group_by(year, region, interval) %>%
+          reframe(est = mean(est)) %>%
+          add_column(length_group = names(mod_pred[i]))
+      }) %>%
+      bind_rows() %>%
+      filter(!is.na(region)) %>%
+      mutate(
+        region = factor(
+          region,
+          levels = c(
+            "North Sea",
+            "Norwegian Coast S",
+            "Norwegian Coast N",
+            "Western Slope",
+            "Svalbard Slope",
+            "Northern Barents Sea",
+            "Central Barents Sea",
+            "Eastern Barents Sea"
+          )
+        )
+      )
+
+    levels(regional_depth_indices$region) <- sub(
+      " ",
+      "\n",
+      levels(regional_depth_indices$region)
+    )
+
+    ### Without depth
+
+    nsim <- 100
+
+    regional_indices <- pbapply::pblapply(seq_along(mod_pred), function(i) {
+      # print(i)
+      pt <- predict(
+        fit[[i]]$mod,
+        newdata = proj_dt,
+        nsim = nsim
+      )
+
+      bind_cols(proj_dt, est = as_tibble(pt)) %>%
+        dtplyr::lazy_dt() %>%
+        pivot_longer(cols = starts_with("V")) %>%
+        group_by(year, depth, X, Y, name) %>%
+        mutate(value = model_family$linkinv(value)) %>%
+        summarise(est = mean(value, na.rm = TRUE), .groups = "drop") %>%
+        mutate(
+          X = 1000 * X,
+          Y = 1000 * Y,
+          length_group = names(mod_pred)[i]
+        ) %>%
+        as_tibble() %>%
+        st_as_sf(coords = c("X", "Y"), crs = dt_crs) %>%
+        st_transform(4326) %>%
+        bind_cols(st_coordinates(.)) %>%
+        rownames_to_column("id") %>%
+        st_join(regions) %>%
+        filter(!duplicated(id)) %>%
+        filter(!is.na(region)) %>%
+        mutate(
+          region = factor(
+            region,
+            levels = c(
+              "North Sea",
+              "Norwegian Coast S",
+              "Norwegian Coast N",
+              "Western Slope",
+              "Svalbard Slope",
+              "Northern Barents Sea",
+              "Central Barents Sea",
+              "Eastern Barents Sea"
+            )
+          )
+        ) %>%
+        group_by(year, region, name) %>%
+        summarise(
+          Y = weighted.mean(Y, est),
+          X = weighted.mean(X, est),
+          depth = weighted.mean(depth, est),
+          value = mean(est),
+          .groups = "drop"
+        ) %>%
+        group_by(year, region) %>%
+        summarise(
+          est = median(value),
+          lwr = quantile(value, 0.025),
+          upr = quantile(value, 0.975),
+          se = sd(value),
+          X_est = median(X),
+          X_lwr = quantile(X, 0.025),
+          X_upr = quantile(X, 0.975),
+          X_se = sd(X),
+          Y_est = median(Y),
+          Y_lwr = quantile(Y, 0.025),
+          Y_upr = quantile(Y, 0.975),
+          Y_se = sd(Y),
+          depth_est = median(depth),
+          depth_lwr = quantile(depth, 0.025),
+          depth_upr = quantile(depth, 0.975),
+          depth_se = sd(depth),
+          .groups = "drop"
+        ) %>%
+        mutate(cv = se / est, .after = "se") %>%
+        mutate(length_group = names(mod_pred[i]), .before = 1) %>%
+        as_tibble()
+    })
+
+    regional_indices <- regional_indices[[1]]
+    levels(regional_indices$region) <- sub(
+      " ",
+      "\n",
+      levels(regional_indices$region)
+    )
+
+    save(
+      regional_indices,
+      regional_depth_indices,
+      file = "data/model_output/temperature-regional-indices.rda",
+      compress = "xz"
+    )
+  } else {
+    load("data/model_output/temperature-regional-indices.rda")
+  }
+}
+```
+
+```{r}
+#| label: fig-region-depth-index
+#| fig-cap: Time series of mean bottom temperature for the regions shown in Fig. 1 in the main manuscript and different depth strata.
+#| fig-height: 10
+if (run_regional) {
+  regional_depth_indices %>%
+    ggplot(aes(x = year, y = est)) +
+    geom_path() +
+    coord_cartesian(expand = FALSE) +
+    scale_x_continuous(
+      breaks = seq(1980, 2030, 4),
+      labels = substr(seq(1980, 2030, 4), 3, 4)
+    ) +
+    facet_grid(interval ~ region) +
+    labs(
+      x = 'Year',
+      y = value_name
+    ) +
+    theme_bw() +
+    theme(legend.position = "bottom")
+}
+```
+
+```{r}
+#| label: fig-region-index
+#| fig-cap: Time series of mean bottom temperature for the regions shown in Fig. 1 in the main manuscript.
+#| fig-height: 7
+
+if (run_regional) {
+  regional_indices %>%
+    ggplot(aes(x = year, y = est)) +
+    geom_ribbon(
+      aes(ymin = lwr, ymax = upr),
+      alpha = 0.4,
+      color = NA,
+      fill = "grey"
+    ) +
+    geom_path() +
+    coord_cartesian(expand = FALSE) +
+    scale_x_continuous(
+      breaks = seq(1980, 2030, 4),
+      labels = substr(seq(1980, 2030, 4), 3, 4)
+    ) +
+    facet_wrap(~region, scales = "free_y") +
+    labs(
+      x = 'Year',
+      y = value_name
+    ) +
+    theme_bw() +
+    theme(legend.position = "bottom")
+}
+```
+
+```{r}
+#| label: fig-region-average
+#| fig-cap: !expr paste0("Average ", sp_name, " by region. The error bar indicates standard deviation.")
+
+if (run_regional) {
+  regional_indices %>%
+    group_by(region) %>%
+    reframe(mean = mean(est), sd = sd(est)) %>%
+    ggplot(aes(
+      x = region,
+      y = mean,
+      ymin = if_else(mean > 0, mean, mean - sd),
+      ymax = if_else(mean > 0, mean + sd, mean)
+    )) +
+    geom_hline(yintercept = 0) +
+    geom_col(color = "black", fill = "grey") +
+    geom_errorbar(width = 0.2) +
+    scale_y_continuous(
+      expand = c(0.01, 0.01),
+      n.breaks = 10,
+      limits = c(-1, NA)
+    ) +
+    # scale_x_discrete(expand = c(0.01, 0.01)) +
+    labs(
+      x = 'Region',
+      y = value_name
+    ) +
+    theme_bw() +
+    theme(legend.position = "bottom")
+}
+```
