@@ -1,0 +1,2818 @@
+---
+title: "SI Text 3: Model selection"
+subtitle: "Beaked and golden redfish: biomass density"
+# author:
+#    - name: Mikko Vihtakari
+#      affiliations:
+#       - ref: imr
+# affiliations: 
+#    - id: imr 
+#      name: Institute of Marine Research, Norway
+date: today
+published-title: "Version"
+format:
+  html:
+    self-contained: true
+    fig-width: 9
+    fig-height: 6
+    code-fold: true
+    output-file: SI-Text-3-model-selection
+    toc: true
+bibliography: ../manuscript/zotero_library.bib
+csl: ../manuscript/ices_jms.csl
+execute:
+  message: false
+  warning: false
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, eval = TRUE, include = FALSE}
+# Clear the workspace for manual code runs
+
+# rm(list = ls()) 
+
+knitr::opts_knit$set(root.dir = '../../') 
+
+knitr::knit_hooks$set(timeit = local({
+  now = NULL
+  function(before, options) {
+    if (before) {
+      now <<- Sys.time()
+    } else {
+      res = round(difftime(Sys.time(), now, units = "mins"), 1)
+      now <<- NULL
+      # use options$label if you want the chunk label as well
+      print(paste('Time:', as.character(res), "min"))
+    }
+  }})
+)
+
+# Settings
+recompile_models <- FALSE # switch to compile the model. If FALSE, the model is loaded from the data/model_output folder.
+recalculate_index <- recompile_models # switch to estimate index values from the predictive skill fold (10%)
+recompile_data <- FALSE # switch to recompile data from sources. FALSE saves a couple of minutes when include_temperature = TRUE
+
+component_ranking <- FALSE # run component ranking?
+model_selection <- FALSE
+family_selection <- FALSE
+spatiotemporal_selection <- FALSE
+
+development_mode <- FALSE # Only uses a subset of data and coarse meshes to able quick compilation of the models. Turn this option off once the document is finished and rerun. 
+```
+
+This supplementary information file for @vihtakari2026 provides a reproducible overview of the model selection process using generalized linear mixed-effects models fitted with the [sdmTMB package](https://CRAN.R-project.org/package=sdmTMB) [@sdmTMB] in R [@rcoreteam]. The four-step model selection procedure employs 10-fold cross-validation via the sdmTMB_cv() function. Models are compared based on total predicted (out-of-sample) negative log-likelihood (NLL) and Akaike information criterion (AIC) values. To further assess the impact of model alternatives on survey indices, visual comparisons are made with the best-fitting model. This document was written with [Quarto](https://quarto.org/) and can be compiled from the project's [GitHub repository](https://github.com/DeepWaterIMR/ref-index-paper). Foldable code fields are included to display the code used for model compilation.
+
+The model selection routine comprises four key steps:
+
+1. The fixed- and random-effect model components are initially [ranked according to model fit](@comp-ranking), as measured by NLL. The fixed effects include gear type (factor), year (factor), month (continuous), bottom depth (continuous), and modelled bottom temperature (continuous). Spatial random fields and IID (independent and identically distributed) spatiotemporal fields are incorporated as random effects. Each fixed effect is evaluated within models that include both spatial and spatiotemporal random fields, while models without fixed effects serve as null models for comparison.
+2. From the previous step all fixed effects are combined into a single model. The influence of each fixed effect on model performance is then assessed by [sequentially removing](@model-selection) one effect at a time, with the goal of identifying the best overall model for both species. All models are fitted with spatial random fields and IID spatiotemporal fields as random effects. A model with only spatial- and spatiotemporal fields is used as a null model for comparison. 
+3. After determining the best-fitting model formula, alternative model families (delta-lognormal, delta-gamma, delta gamma poisson link, and Tweedie distributions) are compared using this formula.
+4. Finally, the influence of different spatiotemporal field structures is evaluated using the best-fitting model and distribution family from previous steps. These structures include IID, first-order autoregressive AR(1), random walk (RW), and the absence of spatiotemporal fields.
+
+Overall, the best fitting model had a formula of rho_biomass ~ 0 + geartype + s(month) + s(depth) + s(temperature), AR1 spatiotemporal random fields and delta lognormal model family as shown below. 
+
+```{r packages}
+#| timeit: !expr if(recompile_data) TRUE else NULL
+
+############## ####
+#### Libraries ----
+
+## Package names
+packages <- 
+  c("tidyverse", "sf", "ggOceanMaps", "ggspatial", "sdmTMB", 
+    "ggeffects", "scales", "concaveman", "plotly", "data.table",
+    "dtplyr", "remotes", "sdmTMBextra", "lubridate", "inlabru", 
+    "future", "pbapply")
+
+## Install packages not yet installed
+installed_packages <- packages %in% rownames(installed.packages())
+
+if("remotes" %in% packages[!installed_packages]) {
+  install.packages("remotes")
+}
+
+if (any(installed_packages == FALSE)) {
+  
+  if("sdmTMBextra" %in% packages[!installed_packages]) {
+    remotes::install_github("pbs-assess/sdmTMBextra", dependencies = TRUE,
+                            upgrade = "never")
+  }
+  
+  installed_packages <- packages %in% rownames(installed.packages())
+  
+  install.packages(packages[!installed_packages])
+}
+
+## Load packages
+invisible(lapply(packages, function(x) {
+  suppressPackageStartupMessages(library(x, character.only = TRUE))}))
+
+# Backend for parallel
+
+if(Sys.info()["sysname"] == "Linux") {
+  library(flexiblas)
+  flexiblas_switch(flexiblas_load_backend("OPENBLAS-THREADS"))
+}
+
+################### ###
+# Custom functions ----
+
+source("R/legacy/make_table.R") # a function to make tables
+source("R/legacy/bubble_map.R")
+
+################ ##
+# ggplot theme ----
+
+theme_cust <- theme_classic(base_size = 12) %+replace%
+  theme(strip.background = element_blank(),
+        panel.background = element_blank(),
+        plot.background = element_blank(),
+        legend.background = element_blank(),
+        legend.box.background = element_blank(),
+        plot.margin = margin(5.5, 10, 5.5, 5.5))
+
+theme_set(theme_cust) # Set default theme globally for the entire project
+
+# Parallel processing settings
+
+n_cores <- 10 # Number of cores to be used in parallel processing within pblapply. Use NULL for sequential processing. "future" uses the n_sessions argument
+n_sessions <- 10 # Number of parallel R sessions to be used in parallel processing within future::plan
+```
+
+<details>
+<summary>Unfold to see R package versions and system information used to generate the document</summary>
+```{r}
+#| label: sys-info
+sessionInfo()
+```
+</details>
+
+# Data
+
+Compile the data: 
+
+```{r data}
+#| timeit: !expr if(recompile_data) TRUE else NULL
+
+# Detailed settings
+
+run_fixef <- TRUE # make fixed effect plot s
+run_index <- TRUE # switch to ex/include the index estimation
+
+include_temperature <- TRUE # switch to include temperature as a predictor variable
+segmental_save <- TRUE # save model files segmentally. Adds flexibility in case of crashes, but increases processing time considerably.
+save_model_output <- FALSE # save model output. Takes tens of minutes. Alternative is to run without saving, which goes quicker, but does not allow reopening the models. 
+
+## Response variable
+response_variable <- "biomass density" # options: "catch biomass" meaning trawl catch weight of the target species (biomass column in dt). Log transformed swept area by each trawl will be used as offset argument. "biomass density" referring to the rho_biomass column giving readily calculated biomass density (biomass/swept area). "catch abundance" and "abundance density" for similar variables using abundance/count data. Note that the width of the trawl influences the relative difference between gear types, which is included to the model, and only affect the absolute level of the index estimate in the end. 
+
+## Model family (use this to set the family)
+model_family <- delta_lognormal()
+model_family_name <- ifelse(is.null(model_family$clean_name), 
+                            model_family$family, model_family$clean_name)
+
+### Link function inversion function
+if(length(model_family$family) > 1) {
+  linkinv <- model_family[[2]]$linkinv
+} else {
+  linkinv <- model_family$linkinv
+}
+
+## Mesh cutoff argument (smaller values create meshes with more knots)
+mesh_cutoff <- ifelse(development_mode, 150, 75) # Minimum distance between knots before a new mesh vertex is added in kilometers
+
+####################
+# Read the data ----
+
+if(recompile_data) {
+  
+  load("data/out/Compiled_redfish_survey_data.rda")
+  
+  dt <- lapply(c("snabeluer", "vanlig uer"), function(filter_sp) {
+    out <- stn %>%
+      distinct() %>% 
+      filter(commonname %in% filter_sp) %>% 
+      rename(lon = longitudestart,
+             lat = latitudestart,
+             year = startyear,
+             depth = bottomdepthstart) %>% 
+      mutate(gear_width = 25) %>% 
+      mutate(cruiseseries = factor(cruiseseries),
+             fyear = factor(year),
+             id = paste(cruiseseries, year, platformname, serialnumber, sep = "-"),
+             swept_area = (gear_width/1852)*distance) %>% 
+      mutate(yday = lubridate::yday(stationstartdate),
+             .before = stationstopdate) %>% 
+      droplevels() %>% 
+      mutate(rho_biomass = biomass/swept_area,
+             rho_abundance = count/swept_area,
+             value = rho_biomass) %>% # this defines the response type
+      filter(!is.na(value))
+    
+    ## Zero catch survey removal
+    tmp <- out %>% 
+      group_by(cruiseseries, cruise, year, platformname) %>% 
+      reframe(sum = sum(value)) %>% 
+      filter(sum == 0) %>% 
+      mutate(tmpid = paste(cruise, year, platformname))
+    
+    out %>% 
+      mutate(tmpid = paste(cruise, year, platformname)) %>% 
+      filter(!tmpid %in% tmp$tmpid) %>% 
+      dplyr::select(-tmpid)
+  }) %>% 
+    bind_rows()
+  
+  ## Reduce data size when running in development mode
+  
+  if(development_mode) {
+    dt <- lapply(unique(dt$commonname), function(k) {
+      dt %>% 
+        filter(year > 2003) %>% 
+        filter(commonname == k) %>% 
+        mutate(sample = rep(1:4, length.out = nrow(.))) %>% 
+        filter(sample == 1) %>% 
+        dplyr::select(-sample)
+    }) %>% bind_rows()
+  }
+  
+  ## Response variable
+  
+  if(response_variable == "biomass density") {
+    dt <- dt %>% mutate(value = rho_biomass, .after = rho_abundance) %>% 
+      filter(!is.na(value))
+  } else if(response_variable == "abundance density") {
+    dt <- dt %>% mutate(value = rho_abundance, .after = rho_abundance) %>% 
+      filter(!is.na(value))
+  } else if(response_variable == "catch biomass") {
+    dt <- dt %>% mutate(value = biomass, .after = rho_abundance) %>% 
+      filter(!is.na(value))
+  } else if(response_variable == "catch abundance") {
+    dt <- dt %>% mutate(value = count, .after = rho_abundance) %>% 
+      filter(!is.na(value))
+  } else {
+    stop("The response_variable object has to be 'biomass density', 'abundance density', 'catch biomass', or 'catch abundance'")
+  }
+  
+  ## CRS
+  
+  dt_crs <- get_crs(dt, ll_names = c("lon", "lat"))
+  
+  dt <- sdmTMB::add_utm_columns(dt, ll_names = c("lon", "lat"), utm_crs = dt_crs)
+  
+  # Response variable type definitions for automatic text
+  
+  model_type <- ifelse(response_variable %in% c("biomass density", "catch biomass"), "Biomass", "Abundance")
+  
+  # Add temperature predictor variable (takes time)
+  if(include_temperature) {
+    load("data/model_output/temperature-model-fit.rda")
+    
+    ## Predict using the data
+    
+    dt <- predict(
+      fit[[1]]$mod,
+      newdata = dt, 
+      type = "response",
+      model = NA,
+      return_tmb_object = FALSE) %>% 
+      dplyr::select(-est_non_rf, -est_rf, -omega_s, -epsilon_st) %>% 
+      rename("temperature" = "est") %>% 
+      relocate("temperature", .after = "depth")
+  }
+  
+  ## Response variables and units for figure labels
+  if(response_variable == "biomass density") {
+    value_name <- expression(paste("Density (kg ", nmi^-2, ")"))
+  } else if(response_variable == "catch biomass") {
+    value_name <- "Catch weight (kg)"
+  } else if(response_variable == "abundance density") {
+    value_name <- expression(paste("Density (n ", nmi^-2, ")"))
+  } else {
+    value_name <- "Catch count (n)"
+  }
+  
+  if(response_variable == "biomass density") {
+    value_unit <- quote(kg~nmi^-2)
+  } else if(response_variable == "catch biomass") {
+    value_unit <- "kg"
+  } else if(response_variable == "abundance density") {
+    value_unit <- quote(n~nmi^-2)
+  } else {
+    value_unit <- "n"
+  }
+  
+  ## Response variables and units for text
+  if(response_variable == "biomass density") {
+    value_text_name <- "Swept area biomass density (kg nmi$^{-2}$)"
+  } else if(response_variable == "catch biomass") {
+    value_text_name <- "Catch weight (kg)"
+  } else if(response_variable == "abundance density") {
+    value_text_name <- "Swept area abundance density (n nmi$^{-2}$)"
+  } else {
+    value_text_name <- "Catch count (n)"
+  }
+  
+  if(response_variable == "biomass density") {
+    value_text_unit <- "kg nmi$^{-2}$"
+  } else if(response_variable == "catch biomass") {
+    value_text_unit <- "kg"
+  } else if(response_variable == "abundance density") {
+    value_text_unit <- "n nmi$^{-2}$"
+  } else {
+    value_text_unit <- "n"
+  }
+  
+  ## Species
+  
+  filter_sp <- "both"
+  sp_name <- case_when(filter_sp == "snabeluer" ~ "beaked redfish", 
+                       filter_sp == "vanlig uer" ~ "golden redfish", 
+                       filter_sp == "both" ~ "beaked and golden redfish")
+  Sp_name <- case_when(filter_sp == "snabeluer" ~ "Beaked redfish", 
+                       filter_sp == "vanlig uer" ~ "Golden redfish", 
+                       filter_sp == "both" ~ "Beaked and golden redfish")
+  
+  dt <- dt %>% 
+    mutate(
+      species = case_when(
+        commonname == "snabeluer" ~ "Beaked redfish", 
+        commonname == "vanlig uer" ~ "Golden redfish"
+      ),
+      .after = "commonname")
+  
+  save(dt, dt_crs, model_type, value_name, value_text_name, value_text_unit,
+       sp_name, Sp_name,
+       file = "data/model_output/model_selection/model-selection-input-data.rda",
+       compress = "xz")
+  
+} else {
+  load("data/model_output/model_selection/model-selection-input-data.rda")
+}
+```
+
+Swept area `r tolower(model_type)` density (`r ifelse(model_type == "Biomass", "kg", "n")` nmi$^{-2}$), called 'value' henceforth, was used as the response variable.
+
+# Component ranking {#comp-ranking}
+
+```{r component-ranking}
+#| code-fold: true
+#| warning: false
+#| message: false
+#| results: hide
+#| timeit: !expr if(recompile_models & component_ranking) TRUE else NULL
+
+if(recompile_models & component_ranking) {
+  
+  component_ranking_list <- tibble(
+    name = c(
+      "Bottom depth",
+      "Year",
+      "Month",
+      "Gear type",
+      "Temperature",
+      "Spatial and spatiotemporal",
+      "Only spatiotemporal"
+    ),
+    formula = list(
+      formula(value ~ s(depth)),
+      formula(value ~ fyear),
+      formula(value ~ s(month)),
+      formula(value ~ geartype),
+      formula(value ~ s(temperature)),
+      formula(value ~ 1),
+      formula(value ~ 1)
+    ),
+    spatial = c(
+      "on",
+      "on",
+      "on",
+      "on",
+      "on",
+      "on",
+      "off"
+    ),
+    spatiotemporal = c(
+      "iid",
+      "iid",
+      "iid",
+      "iid",
+      "iid",
+      "iid",
+      "iid"
+    )
+  )
+  
+  if(!include_temperature) {
+    component_ranking_list <- 
+      component_ranking_list %>% filter(name != "Temperature")
+  }
+  
+  component_ranking_list <- component_ranking_list %>% 
+    replicate_df("commonname", levels(dt$commonname)) %>% 
+    relocate("commonname", .before = 1)
+  
+  if(!dir.exists("data/model_output/model_selection")) {
+    dir.create("data/model_output/model_selection")
+  }
+  
+  saveRDS(component_ranking_list, 
+          file = "data/model_output/model_selection/component_ranking_list.rds")
+  
+  future::plan("multisession", workers = n_sessions)
+  options(future.globals.maxSize = 1000 * 1024^2, future.seed = TRUE)
+  
+  ## Fit the models 
+  
+  message("Cross-validation (takes an hour on a powerful computer)")
+  
+  tmp <- pbapply::pblapply(1:nrow(component_ranking_list), function(i) {
+    
+    x <- dt %>% 
+      filter(commonname == component_ranking_list$commonname[i]) %>%
+      arrange(stationstartdate, year, missionid, serialnumber) %>% 
+      droplevels()
+    
+    comp_ranking_mesh <- make_mesh(x, xy_cols = c("X", "Y"), cutoff = mesh_cutoff)
+    clust <- sample(seq_len(10), size = nrow(x), replace = TRUE)
+    
+    print(i)
+    term <- all.vars(component_ranking_list$formula[[i]])[-1]
+    continuous_predictor <- 
+      any(grepl(paste0("s\\(", term, "\\)"),
+                as.character(component_ranking_list$formula[[i]])))
+    
+    y <- x %>% {
+      if(continuous_predictor) {
+        mutate(., {{term}} := as.numeric(as.character(get(term))))
+      } else {
+        if(length(term) > 0) mutate(., {{term}} := as.factor(get(term))) else .
+      }}
+    
+    out <- try({
+      sdmTMB_cv(
+        component_ranking_list$formula[[i]],
+        data = y,
+        mesh = comp_ranking_mesh,
+        fold_ids = clust,
+        family = model_family,
+        spatial = component_ranking_list$spatial[[i]],
+        spatiotemporal = component_ranking_list$spatiotemporal[[i]],
+        time = "year",
+        control = sdmTMBcontrol(newton_loops = 2)
+      )
+    })
+    
+    if(inherits(out, "try-error")) {
+      warning(paste(paste(component_ranking_list$commonname,
+                          component_ranking_list$name, sep = "_")[i], "crashed"))
+    }
+    
+    # Save / return
+    if(segmental_save) {
+      saveRDS(
+        list(mod = out, mesh = comp_ranking_mesh),
+        file =
+          paste0("data/model_output/model_selection/Component-ranking-models-",
+                 gsub("\\(.*\\)", "", model_family_name), "_",
+                 paste(component_ranking_list$commonname, 
+                       gsub(" ", "-", component_ranking_list$name), sep = "_")[i],
+                 ".rds"),
+        compress = "xz"
+      )
+    } else {
+      return(list(mod = out, mesh = comp_ranking_mesh))
+    }
+  })
+  
+  # Load and make objects
+  
+  if(segmental_save) {
+    component_ranking_models <- 
+      pbapply::pblapply(1:nrow(component_ranking_list), function(i) {
+        readRDS(
+          file =
+            paste0("data/model_output/model_selection/Component-ranking-models-",
+                   gsub("\\(.*\\)", "", model_family_name), "_",
+                   paste(component_ranking_list$commonname, 
+                         gsub(" ", "-", component_ranking_list$name), sep = "_")[i],
+                   ".rds")
+        )$mod
+      })
+    
+    component_ranking_models <- 
+      setNames(component_ranking_models, 
+               paste(component_ranking_list$name, 
+                     component_ranking_list$commonname, sep = "_"))
+    
+    component_ranking_mesh <- 
+      pbapply::pblapply(
+        unique(dt$commonname), function(k) {
+          readRDS(
+            dir("data/model_output/model_selection/", 
+                pattern = paste0("Component-ranking-models-",
+                                 gsub("\\(.*\\)", "", model_family_name), "_", k),
+                full.names = TRUE)[1])$mesh
+        })
+  } else {
+    component_ranking_models <- lapply(tmp, function(k) k$mod)
+    component_ranking_models <- 
+      setNames(component_ranking_models, 
+               paste(component_ranking_list$name, 
+                     component_ranking_list$commonname, sep = "_"))
+    
+    component_ranking_mesh <- 
+      lapply(c(1,8), function(i) tmp[[i]]$mesh)
+    
+    component_ranking_mesh <- 
+      setNames(component_ranking_mesh, levels(dt$commonname))
+    
+    if(save_model_output) {
+      saveRDS(component_ranking_models, 
+              file = paste0(
+                "data/model_output/model_selection/Component-ranking-models-",
+                gsub("\\(.*\\)", "", model_family_name), ".rds"),
+              compress = "xz"
+      ) 
+    }
+    
+    saveRDS(component_ranking_mesh,
+            file = paste0(
+              "data/model_output/model_selection/Component-ranking-meshes-",
+              gsub("\\(.*\\)", "", model_family_name), ".rds"),
+            compress = "xz"
+    )  
+  }
+  
+  ## Save required components
+  component_ranking_params <- 
+    list(
+      model_names = names(component_ranking_models)
+    )
+  
+  saveRDS(
+    component_ranking_params,
+    file = 
+      paste0(
+        "data/model_output/model_selection/Component-ranking-parameters-",
+        gsub("\\(.*\\)", "", model_family_name), ".rds")
+  )
+  
+} else {
+  component_ranking_list <- 
+    readRDS(
+      file = "data/model_output/model_selection/component_ranking_list.rds")
+  
+  component_ranking_mesh <- 
+    readRDS(paste0(
+      "data/model_output/model_selection/Component-ranking-meshes-",
+      gsub("\\(.*\\)", "", model_family_name), ".rds")
+    )
+  
+  component_ranking_params <-
+    readRDS(paste0(
+      "data/model_output/model_selection/Component-ranking-parameters-",
+      gsub("\\(.*\\)", "", model_family_name), ".rds")
+    )
+}
+```  
+
+```{r}
+#| label: tbl-component-ranking
+#| timeit: !expr if(recompile_models & component_ranking) TRUE else NULL
+#| tbl-cap: !expr paste0("Ranking of single-component models for ", sp_name, " based on ten-fold cross-validation. The models contain spatial and spatiotemporal random fields, unless specified otherwise. Each model is compared to the best fitting single component model ($\\Delta$NLL and $\\Delta$NLL % columns). The negative log-likelihood value is given in the NLL column and AIC difference to the best fitting model in the $\\Delta$AIC column.")
+
+## Table
+if(recompile_models & component_ranking) {
+  component_ranking_tab <- 
+    pbapply::pblapply(seq_along(component_ranking_models), function(i) {
+      if(inherits(component_ranking_models[[i]], "try-error")) {
+        tibble(
+          species = case_when(
+            component_ranking_list$commonname[i] == "snabeluer" ~ "Beaked redfish", 
+            component_ranking_list$commonname[i] == "vanlig uer" ~ "Golden redfish"
+          ),
+          model = component_ranking_list$name[i],
+          formula = paste(trimws(format(component_ranking_list$formula[[i]])), 
+                          collapse = ""),
+          spatial = component_ranking_list$spatial[[i]],
+          spatiotemporal = component_ranking_list$spatiotemporal[[i]],
+          crashed = TRUE,
+          converged = FALSE,
+          sanity = FALSE,
+          loglik = NA,
+          AIC = NA
+        )
+      } else {
+        tibble(
+          species = case_when(
+            component_ranking_list$commonname[i] == "snabeluer" ~ "Beaked redfish", 
+            component_ranking_list$commonname[i] == "vanlig uer" ~ "Golden redfish"
+          ),
+          model = component_ranking_list$name[i],
+          formula = paste(trimws(format(component_ranking_models[[i]]$models[[1]]$formula[[1]])), 
+                          collapse = ""),
+          spatial = unique(component_ranking_models[[i]]$models[[1]]$spatial),
+          spatiotemporal = unique(component_ranking_models[[i]]$models[[1]]$spatiotemporal),
+          crashed = FALSE,
+          converged = component_ranking_models[[i]]$converged,
+          sanity = all(unlist(sanity(component_ranking_models[[i]]$models[[1]],
+                                     silent = TRUE))),
+          loglik = component_ranking_models[[i]]$sum_loglik,
+          AIC = median(sapply(component_ranking_models[[i]]$models, AIC))
+        )
+      }
+    }, cl = n_cores) %>% 
+    bind_rows() %>% 
+    group_by(species) %>% 
+    arrange(-loglik) %>% 
+    mutate(
+      deltaNLL = loglik - max(loglik, na.rm = TRUE),
+      deltaNLL_pr = 100*(1-loglik/max(loglik, na.rm = TRUE)),
+      deltaAIC = AIC - min(AIC, na.rm = TRUE),
+      deltaAIC_pr = 100*(AIC/min(AIC, na.rm = TRUE) - 1)
+    ) %>% 
+    ungroup()
+  
+  ## Save
+  write_csv(
+    component_ranking_tab,
+    file =
+      paste0("data/model_output/model_selection/Component-ranking-table-", 
+             gsub("\\(.*\\)", "", model_family_name),
+             ".csv")
+  )
+} else {
+  component_ranking_tab <- read_csv(
+    paste0("data/model_output/model_selection/Component-ranking-table-", 
+           gsub("\\(.*\\)", "", model_family_name),
+           ".csv")
+  )
+}
+
+## Print the table
+component_ranking_tab %>% 
+  filter(model != "Month categorical") %>%
+  mutate(model = gsub(" continuous", "", model)) %>% 
+  relocate(formula, .after = last_col()) %>%
+  dplyr::select(-spatial, -spatiotemporal, -AIC, -deltaAIC_pr) %>% 
+  mutate(loglik = abs(loglik), 
+         deltaNLL = abs(deltaNLL),
+         deltaNLL_pr = abs(deltaNLL_pr)) %>% 
+  rename(
+    "Species" = "species", "Model" = "model", "Formula" = "formula", 
+    "Crashed" = "crashed", "Converged" = "converged", "Sanity test" = "sanity", 
+    "NLL" = "loglik", "ΔNLL" = "deltaNLL", "ΔNLL %" =  "deltaNLL_pr", 
+    "ΔAIC" = "deltaAIC"
+  ) %>% 
+  make_table(digits = c(0,0,0,0,0,0,0,1,0,0))
+
+# More compact alternative:
+# component_ranking_tab %>% 
+#   mutate(deltaNLL = abs(deltaNLL)) %>% 
+#   dplyr::select(species, model, formula, sanity, deltaNLL) %>%
+#   ungroup() %>% 
+#   pivot_wider(id_cols = c(model, formula, sanity), 
+#               names_from = species,
+#               values_from = deltaNLL) %>% 
+#   filter(!model %in% "Full model s(logdepth)") %>% 
+#   rename("Model" = "model", "Formula" = "formula", 
+#          "Sanity test" = "sanity") %>%
+#   make_table(digits = 2)
+```
+
+```{r}
+#| label: fig-component-ranking
+#| fig-cap: !expr paste("Ranking of single-component models for", sp_name, "based on ten-fold cross-validation. The y-axis lists the model components. The x-axis shows the negative log-likelihood for each model, where higher values indicate better model fit. Symbol color and shape reflect model diagnostics; black circles denote models without issues, while grey symbols indicate models that failed the sanity check or did not converge.")
+
+tmp <- component_ranking_tab %>%
+  filter(model != "Month continuous") %>%
+  mutate(model = gsub(" categorical", "", model)) %>% 
+  group_by(species) %>% 
+  mutate(status = case_when(
+    !sanity & !converged ~ "Nonconvergent &\nsanity test issues",
+    !sanity ~ "Sanity test issues",
+    !converged ~ "Nonconvergent",
+    .default = "All OK"
+  ), .after = "sanity") %>% 
+  mutate(deltaNLL = abs(loglik - max(loglik, na.rm = TRUE))) %>% 
+  mutate(deltaNLL = abs(ifelse(crashed, Inf, deltaNLL))) %>% 
+  rename("value" = "deltaNLL") %>% 
+  ungroup()
+
+tmp <- tmp %>% 
+  mutate(
+    model = factor(
+      model,
+      levels = tmp %>% group_by(model) %>% reframe(value = mean(value)) %>% 
+        arrange(value) %>% pull(model) %>% rev())
+  )
+
+ggplot(tmp, aes(x = model, y = value, color = status, shape = status)) +
+  geom_point(size = 3) +
+  scale_shape_manual(values = c(16,15,17,18)) +
+  scale_color_manual(values = c("black", rep("grey", 3))) +
+  facet_grid(~species, scales = "free") +
+  coord_flip() + 
+  # scale_y_continuous(transform = "sqrt") + 
+  labs(y = "Negative log likelihood difference",
+       x = "Variable", shape = "Model diagnostics", color = "Model diagnostics") +
+  theme(legend.position = "bottom",
+        panel.grid.major = element_line(color = "grey", linewidth = LS(0.5)))
+```
+
+## Fixed effects
+
+```{r}
+#| label: fig-fixed-effects
+#| fig-height: 12
+#| timeit: !expr if(recompile_models & component_ranking) TRUE else NULL
+#| fig-cap: Conditional fixed effects for single component models. 2024 was used as the temporal reference point. Error bars and shading indicate 95% confidence intervals.
+
+if(run_fixef) {
+  
+  if(recompile_models & component_ranking) {
+    terms <- grep("spatial|spatiotemporal", names(component_ranking_models), 
+                  ignore.case = TRUE, invert = TRUE, value = TRUE)
+    
+    fixef_dt <- 
+      pbapply::pblapply(terms, function(k) {
+        
+        if(inherits(component_ranking_models[[k]], "try-error")) return(NULL)
+        
+        model <- component_ranking_models[[k]]$models[[1]]
+        
+        term <- 
+          all.vars(component_ranking_models[[k]]$models[[1]]$formula[[1]])[-1] 
+        model_data <- component_ranking_models[[k]]$data
+        
+        if(inherits(model_data[[term]], "numeric")) {
+          tt <- 
+            seq(min(model_data[[term]]), max(model_data[[term]]), 
+                length.out = 50) %>% 
+            tibble() %>% 
+            setNames(term) 
+        } else {
+          tt <- 
+            unique(model_data[[term]]) %>% 
+            sort() %>% 
+            tibble() %>% 
+            setNames(term)
+        }
+        
+        if(!grepl("Year", k)) {
+          tt <- tt %>% 
+            mutate(year = max(model_data[["year"]]))
+        } else {
+          tt <- tt %>% 
+            mutate(year = as.integer(as.character(get(term))))
+        }
+        
+        tmp <- predict(
+          model, tt,
+          se_fit = TRUE, re_form = NA, model = NA
+        ) %>%
+          mutate(lwr = linkinv(est - est_se), 
+                 upr = linkinv(est + est_se), 
+                 est = linkinv(est)) 
+        
+        ymax <- ifelse(max(tmp$upr) > 1.5*max(tmp$est), 1.5*max(tmp$est), 
+                       max(tmp$upr))
+        
+        tmp <- tmp %>% 
+          mutate(commonname = unique(model_data$commonname), .before = 1)
+        
+        list(dt = tmp, ymax = ymax, term = term)
+      }, cl = n_cores)
+    
+    
+    fixef_dt <- setNames(fixef_dt, terms)
+    
+    ## Save
+    
+    saveRDS(
+      fixef_dt,
+      file =
+        paste0(
+          "data/model_output/model_selection/Component-ranking-fixed-effects-", 
+          gsub("\\(.*\\)", "", model_family_name),
+          ".rds"),
+      compress = "xz"
+    )
+    
+  } else {
+    terms <- grep("spatial|spatiotemporal", component_ranking_params$model_names,
+                  ignore.case = TRUE, invert = TRUE, value = TRUE)
+    
+    fixef_dt <- readRDS(
+      file =
+        paste0(
+          "data/model_output/model_selection/Component-ranking-fixed-effects-", 
+          gsub("\\(.*\\)", "", model_family_name),
+          ".rds")
+    )
+  }
+  
+  cowplot::plot_grid(
+    plotlist = 
+      lapply(unique(dt$commonname), function(k) {
+        # print(k)
+        tmp <- fixef_dt[grep(k, terms, ignore.case = TRUE, value = TRUE)]
+        
+        cowplot::plot_grid(
+          plotlist = 
+            lapply(names(tmp), function(kk) {
+              # print(kk)
+              g <- tmp[[kk]]
+              
+              if(is.null(g) | inherits(g, "try-error")) {
+                return({
+                  ggplot() + 
+                    geom_blank() + 
+                    annotate(
+                      "text", x = 0, y = 0, 
+                      label = paste(kk, "crashed", sep = "\n"),
+                      size = FS(10)) +
+                    theme_void()
+                })
+              }
+              
+              if(inherits(g$dt[[g$term]], "numeric")) {
+                g$dt %>%
+                  ggplot(aes(x = get(g$term), y = est, ymin = lwr, ymax = upr)) +
+                  geom_ribbon(alpha = 0.3, color = NA) +
+                  geom_path() +
+                  coord_cartesian(expand = FALSE, ylim = c(0, g$ymax)) +
+                  labs(y = value_name, x = g$term) +
+                  theme_bw(base_size = 10) +
+                  theme(legend.position = c(0.1,0.7),
+                        strip.background = element_blank(),
+                        panel.background = element_blank(),
+                        plot.background = element_blank(),
+                        legend.background = element_blank(),
+                        legend.box.background = element_blank(),
+                        plot.margin = margin(5.5, 10, 5.5, 5.5))
+              } else {
+                g$dt %>%
+                  ggplot(aes(x = get(g$term), y = est, ymin = lwr, ymax = upr)) +
+                  geom_errorbar(width = 0.2, position = position_dodge(0.5)) +
+                  geom_point(position = position_dodge(0.5)) +
+                  coord_cartesian(expand = FALSE, ylim = c(0, g$ymax)) + {
+                    if(g$term == "fyear") {
+                      scale_x_discrete(
+                        breaks = unique(g$dt$fyear),
+                        labels = substr(unique(g$dt$fyear), 3, 4),
+                        guide = guide_axis(n.dodge = 2)
+                      ) 
+                    }
+                  } +
+                  labs(y = value_name, x = g$term) +
+                  theme_bw(base_size = 10) +
+                  theme(legend.position = "none",
+                        strip.background = element_blank(),
+                        panel.background = element_blank(),
+                        plot.background = element_blank(),
+                        legend.background = element_blank(),
+                        legend.box.background = element_blank(),
+                        plot.margin = margin(5.5, 10, 5.5, 5.5))
+              }
+            })
+        )
+        
+      }),
+    labels = unique(dt$species), ncol = 1
+  )
+}
+```
+
+## Survey indices
+
+```{r comp-rank-survey-indices}
+#| timeit: !expr if(recalculate_index & component_ranking) TRUE else NULL
+
+if(run_index) {
+  if(recalculate_index & component_ranking) {
+    
+    proj_dt <- read_rds("data/model_output/prediction-grid-data.rds") %>% 
+      distinct(X, Y, depth, year) 
+    
+    ## Prediction grid cell side length
+    grid_side_size <- attributes(proj_dt)$grid_side_size # kilometers due to UTM projection and division by 1000
+    
+    if(development_mode) {
+      proj_dt <- proj_dt %>% 
+        filter(year > 2003) %>% 
+        mutate(sample = rep(1:4, length.out = nrow(.))) %>% 
+        filter(sample == 1) %>% 
+        dplyr::select(-sample)
+    }
+    
+    models <- component_ranking_models
+    
+    index <- pbapply::pblapply(seq_along(models), function(i) {
+      
+      # print(i)
+      
+      k <- models[[i]]
+      if(inherits(k, "try-error")) return(NULL)
+      k_name <- names(models)[i]
+      
+      terms <- trimws(unlist(strsplit(
+        as.character(k$models[[1]]$formula[[1]])[3], "\\+")))
+      terms <- terms[terms != "0"]
+      terms <- terms[!grepl(":", terms)]
+      
+      pred_dt <- proj_dt
+      
+      if(grepl("Spatial and spatiotemporal", k_name)) {
+        pred_dt <- pred_dt %>% distinct(X, Y, year)
+      } else {
+        fyear <- any(grepl("fyear", terms))
+        geartype <- any(grepl("geartype", terms))
+        logdepth <- any(grepl("logdepth", terms))
+        cruiseseries <- any(grepl("cruiseseries", terms))
+        season <- any(grepl("season", terms))
+        depth <- any(grepl("depth", terms))
+        month <- any(grepl("month", terms))
+        smonth <- any(grepl("s\\(month\\)", terms))
+        yday <- any(grepl("yday", terms))
+        distance <- any(grepl("distance", terms))
+        commonname <- any(grepl("commonname", terms))
+        temperature <- any(grepl("temperature", terms))
+        
+        if(!any(c(depth, temperature))) pred_dt <- pred_dt %>% distinct(X, Y, year)
+        if(logdepth) pred_dt <- pred_dt %>% mutate(logdepth = log(depth))
+        if(geartype) pred_dt <- pred_dt %>% mutate(geartype = "Shrimp")
+        if(fyear) pred_dt <- pred_dt %>% mutate(fyear = as.factor(year))
+        if(season) pred_dt <- pred_dt %>% mutate(season = "H2")
+        if(month) pred_dt <- pred_dt %>% replicate_df("month", if(smonth) as.integer(8) else factor(8))
+        if(yday) pred_dt <- pred_dt %>% mutate(yday = 225)
+        if(distance) pred_dt <- pred_dt %>% mutate(distance = 1) # assuming 3 knot trawling speed for 20 min
+        
+        if(include_temperature & temperature) {
+          
+          ### Temperature model ###
+          load("data/model_output/temperature-model-fit.rda")
+          
+          ## Predict using the data
+          
+          pred_dt <- predict(
+            fit[[1]]$mod,
+            newdata = pred_dt %>% 
+              mutate(fyear = as.factor(year),
+                     month = as.integer(8)),
+            type = "response",
+            model = NA,
+            return_tmb_object = FALSE) %>% 
+            dplyr::select(-est_non_rf, -est_rf, -omega_s, -epsilon_st) %>% 
+            rename("temperature" = "est") 
+         
+          if(!smonth) {
+            pred_dt <- pred_dt %>% mutate(month = factor(month))
+          }
+           
+        }
+        
+      }
+      
+      ## Slower more official way with CIs
+      # lapply(seq_along(k$models), function(j) {
+      #   predict(k$models[[j]], newdata = proj_dt, type = "response", model = NA,
+      #           return_tmb_object = TRUE) %>% 
+      #     get_index(
+      #       bias_correct = FALSE,
+      #       area = (grid_side_size/1.852)^2) %>% # grid cell area in square nautical miles
+      #     mutate(est = est/1e6, # convert kg to kilotonnes
+      #            lwr = lwr/1e6,
+      #            upr = upr/1e6, 
+      #            cv = sqrt(exp(se^2) - 1)) %>% 
+      #     mutate(model = k_name, .before = 1) %>% 
+      #     mutate(fold = j)
+      # }) %>% 
+      #   bind_rows()
+      
+      ## Quicker way
+      mod_pred <- lapply(seq_along(k$models), function(j) {
+        predict(k$models[[j]], newdata = pred_dt, type = "response", model = NA,
+                return_tmb_object = FALSE) %>%
+          mutate(fold = j)
+      })
+      
+      mod_pred %>%
+        bind_rows() %>%
+        group_by(fold, year, X, Y) %>%
+        reframe(est = mean(est)) %>%
+        group_by(fold, year) %>%
+        reframe(
+          # Y = weighted.mean(Y, est),
+          # X = weighted.mean(X, est),
+          # depth = weighted.mean(depth, est),
+          est = (sum(est)*(grid_side_size/1.852)^2)/1e6
+        ) %>%
+        mutate(lwr = NA, upr = NA, cv = NA, se = NA) %>%
+        mutate(commonname = unique(k$data$commonname),
+               model = k_name, 
+               .before = 1)
+    }, cl = length(models))
+    
+    names(index) <- names(models)
+    
+    write_rds(
+      index,
+      file =
+        paste0("data/model_output/model_selection/Component-ranking-indices-", 
+               gsub("\\(.*\\)", "", model_family_name),
+               ".rds"), 
+      compress = "xz"
+    )
+    
+    sc_indices <- index
+    
+  } else {
+    
+    proj_dt <- read_rds("data/model_output/prediction-grid-data.rds") %>% 
+      distinct(X, Y, depth, year)
+    
+    sc_indices <- read_rds(
+      paste0("data/model_output/model_selection/Component-ranking-indices-", 
+             gsub("\\(.*\\)", "", model_family_name),
+             ".rds"), 
+    ) 
+  }
+}
+```
+
+```{r}
+#| code-fold: true
+#| label: fig-comp-rank-index
+#| fig-height: !expr ceiling(length(sc_indices)/3)*2.5
+#| fig-cap: !expr paste0("Survey indices estimated using single-component models for ", sp_name, " using spatiotemporal generalized linear mixed effects models with the sdmTMB package (colored solid line). Black lines with shading indicate the full biomass models with multiple components; 0 + geartype + s(month) + s(depth) + s(temperature). ", value_text_name, " is used as the response variable, and the models use meshes with ", paste(sapply(component_ranking_mesh, function(k) k$mesh$n), collapse = " and "), " vertices (knots), as well as ", model_family_name," model family. Predictions are made to a grid with ", proj_dt %>% distinct(X,Y) %>% nrow(), " cells with a side of ", attributes(proj_dt)$grid_side_size, " km. Each line represents one fold from the 10-fold cross-validation. See Table 1 for more detailed model specification.")
+
+if(run_index) {
+  tmp <- lapply(sc_indices, function(k) {
+    if(inherits(k, "try-error")) return(NULL)
+    if(any(!is.na(k$upr))) {
+      if(max(k$upr, na.rm = TRUE) > 2*max(k$est, na.rm = TRUE)) {
+        k[k$upr > 1.5*max(k$est, na.rm = TRUE),]$upr <- ceiling(1.5*max(k$est, na.rm = TRUE))
+      }}
+    k
+  }) %>%
+    bind_rows() %>% 
+    filter(!is.na(year)) %>% 
+    mutate(model = gsub("_snabeluer|_vanlig uer", "", model)) %>% 
+    # mutate(model = factor(model, levels = names(sc_indices))) %>% 
+    mutate(
+      species = case_when(
+        commonname == "snabeluer" ~ "Beaked redfish", 
+        commonname == "vanlig uer" ~ "Golden redfish"
+      ),
+      .after = "commonname")
+  
+  load("data/model_output/index-bm.rda")
+  
+  index <- index %>% 
+    bind_rows() %>% 
+    rename("species" = "length_group")
+  
+  cowplot::plot_grid(
+    plotlist = 
+      lapply(unique(tmp$species), function(k) {
+        ggplot() +
+          geom_ribbon(
+            data = index %>% filter(species == k),
+            aes(year, est, ymin = lwr, ymax = upr), alpha = 0.3, color = NA, 
+            fill = "grey") +
+          geom_path(
+            data = index %>% filter(species == k),
+            aes(year, est), alpha = 0.5) +
+          geom_path(
+            data = tmp %>% filter(species == k),
+            aes(year, est, color = model, group = fold), alpha = 0.5) +
+          facet_wrap(~model, scales = "free") + 
+          coord_cartesian(expand = FALSE, ylim = c(0, NA)) +
+          scale_x_continuous(
+            breaks = seq(1980, 2030, 4),
+            labels = substr(seq(1980, 2030, 4),3,4)
+          ) +
+          labs(
+            x = 'Year',
+            y = ifelse(model_type == "Biomass", 'Biomass (kt)', 
+                       'Abundance (millions)')
+          ) +
+          theme_bw() +
+          theme(legend.position = "none")
+      }),
+    labels = unique(tmp$species), ncol = 1
+  )
+}
+```
+
+# Model selection {#model-selection}
+
+The fixed effects depth, temperature, month, year and gear type were selected for the model selection step. Elements were removed from the full model to find the best fitting model formula. 
+
+```{r model-selection}
+#| code-fold: true
+#| warning: false
+#| message: false
+#| results: hide
+#| timeit: !expr if(recompile_models & model_selection) TRUE else NULL
+
+if(recompile_models & model_selection) {
+  
+  model_list <- tibble(
+    name = c(
+      "Full model",
+      "No year",
+      "No year & depth",
+      "No year & temperature",
+      "No year & gear type",
+      "No year & month",
+      "No spatial",
+      "No spatiotemporal",
+      "Null model"
+    ), 
+    formula = list(
+      formula(value ~ 0 + geartype + s(month) + fyear + s(depth) + s(temperature)),
+      formula(value ~ 0 + geartype + s(month) + s(depth) + s(temperature)),
+      formula(value ~ 0 + geartype + s(month) + s(temperature)),
+      formula(value ~ 0 + geartype + s(month) + s(depth)),
+      formula(value ~ 0 + s(month) + s(depth) + s(temperature)),
+      formula(value ~ 0 + geartype + s(depth) + s(temperature)),
+      formula(value ~ 0 + geartype + s(month) + fyear + s(depth) + s(temperature)),
+      formula(value ~ 0 + geartype + s(month) + fyear + s(depth) + s(temperature)),
+      formula(value ~ 1)
+    ),
+    spatial = c(
+      "on",
+      "on",
+      "on",
+      "on",
+      "on",
+      "on",
+      "off",
+      "on",
+      "on"
+    ),
+    spatiotemporal = c(
+      "iid", 
+      "iid", 
+      "iid", 
+      "iid", 
+      "iid", 
+      "iid", 
+      "iid", 
+      "off",
+      "iid"
+    )
+  )
+  
+  model_list <- model_list %>% 
+    replicate_df("commonname", levels(dt$commonname)) %>% 
+    relocate("commonname", .before = 1)
+  
+  if(!dir.exists("data/model_output/model_selection")) {
+    dir.create("data/model_output/model_selection")
+  }
+  
+  saveRDS(model_list, 
+          file = "data/model_output/model_selection/model_selection_list.rds")
+  
+  future::plan("multisession", workers = n_sessions)
+  options(future.globals.maxSize = 1000 * 1024^2, future.seed = TRUE)
+  
+  ## Fit the models
+  
+  message("Cross-validation (takes forever)")
+  
+  tmp <- pbapply::pblapply(1:nrow(model_list), function(i) {
+    
+    x <- dt %>% 
+      filter(commonname == model_list$commonname[i]) %>%
+      arrange(stationstartdate, year, missionid, serialnumber) %>% 
+      droplevels()
+    
+    model_selection_mesh <- make_mesh(x, xy_cols = c("X", "Y"), cutoff = mesh_cutoff)
+    clust <- sample(seq_len(10), size = nrow(x), replace = TRUE)
+    
+    print(i)
+    term <- all.vars(model_list$formula[[i]])[-1]
+    
+    if(length(term) > 0) {
+      continuous_predictor <- 
+        sapply(term, function(j) {
+          any(grepl(paste0("s\\(", j, "\\)"),
+                    as.character(model_list$formula[[i]])))
+        })
+      
+      continuous_columns <- names(continuous_predictor)[continuous_predictor]
+      categorical_columns <- names(continuous_predictor)[!continuous_predictor]
+      
+      if(length(continuous_columns) > 0) {
+        x <- x %>% 
+          mutate(across(all_of(continuous_columns), as.numeric))
+      }
+      
+      if(length(categorical_columns) > 0) {
+        x <- x %>% 
+          mutate(across(all_of(categorical_columns), as.factor))
+      }
+    }
+    
+    out <- try({
+      sdmTMB_cv(
+        model_list$formula[[i]],
+        data = x,
+        mesh = model_selection_mesh,
+        fold_ids = clust,
+        family = model_family,
+        spatial = model_list$spatial[[i]],
+        spatiotemporal = model_list$spatiotemporal[[i]],
+        time = "year",
+        control = sdmTMBcontrol(newton_loops = 2)
+      )
+    })
+    
+    if(inherits(out, "try-error")) {
+      warning(paste(paste(model_list$commonname, 
+                          model_list$name, sep = "_")[i], "crashed"))
+    }
+    
+    # Save / return
+    if(segmental_save) {
+      saveRDS(
+        list(mod = out, mesh = model_selection_mesh),
+        file =
+          paste0("data/model_output/model_selection/Model-selection-models-",
+                 gsub("\\(.*\\)", "", model_family_name), "_",
+                 paste(model_list$commonname, gsub(" ", "-", model_list$name), sep = "_")[i],
+                 ".rds"),
+        compress = "xz"
+      )
+    } else {
+      return(list(mod = out, mesh = model_selection_mesh))
+    }
+  })
+  
+  # Load and make objects
+  
+  if(segmental_save) {
+    model_selection_models <- 
+      pbapply::pblapply(1:nrow(model_list), function(i) {
+        readRDS(
+          file =
+            paste0("data/model_output/model_selection/Model-selection-models-",
+                   gsub("\\(.*\\)", "", model_family_name), "_",
+                   paste(model_list$commonname, 
+                         gsub(" ", "-", model_list$name), sep = "_")[i],
+                   ".rds")
+        )$mod
+      })
+    
+    model_selection_models <- 
+      setNames(model_selection_models, 
+               paste(model_list$name, 
+                     model_list$commonname, sep = "_"))
+    
+    model_selection_mesh <- 
+      pbapply::pblapply(
+        unique(dt$commonname), function(k) {
+          readRDS(
+            dir("data/model_output/model_selection/", 
+                pattern = paste0("Model-selection-models-",
+                                 gsub("\\(.*\\)", "", model_family_name), "_", k),
+                full.names = TRUE)[1])$mesh
+          
+          
+        })
+  } else {
+    model_selection_models <- lapply(tmp, function(k) k$mod)
+    model_selection_models <- 
+      setNames(model_selection_models, 
+               paste(model_list$name, 
+                     model_list$commonname, sep = "_"))
+    
+    model_selection_mesh <- 
+      lapply(c(1,10), function(i) tmp[[i]]$mesh)
+    
+    model_selection_mesh <- 
+      setNames(model_selection_mesh, levels(dt$commonname))
+    
+    if(save_model_output) {
+      saveRDS(model_selection_models, 
+              file = paste0(
+                "data/model_output/model_selection/Model-selection-models-",
+                gsub("\\(.*\\)", "", model_family_name), ".rds"),
+              compress = "xz"
+      ) %>% system.time()
+    }
+    
+    saveRDS(model_selection_mesh,
+            file = paste0(
+              "data/model_output/model_selection/Model-selection-meshes-",
+              gsub("\\(.*\\)", "", model_family_name), ".rds"),
+            compress = "xz"
+    )  
+  }
+  
+  ## Save required components
+  model_selection_params <- 
+    list(
+      model_names = names(model_selection_models)
+    )
+  
+  saveRDS(
+    model_selection_params,
+    file = 
+      paste0(
+        "data/model_output/model_selection/Model-selection-parameters-",
+        gsub("\\(.*\\)", "", model_family_name), ".rds")
+  )
+  
+} else {
+  model_list <- 
+    readRDS(
+      file = "data/model_output/model_selection/model_selection_list.rds")
+  
+  model_selection_mesh <- 
+    readRDS(paste0(
+      "data/model_output/model_selection/Model-selection-meshes-",
+      gsub("\\(.*\\)", "", model_family_name), ".rds")
+    )
+  
+  model_selection_params <-
+    readRDS(paste0(
+      "data/model_output/model_selection/Model-selection-parameters-",
+      gsub("\\(.*\\)", "", model_family_name), ".rds")
+    )
+}
+```  
+
+```{r}
+#| label: tbl-model-selection
+#| timeit: !expr if(recompile_models & model_selection) TRUE else NULL
+#| tbl-cap: !expr paste0("Model selection for ", sp_name, " based on ten-fold cross-validation. The models contain spatial and spatiotemporal random fields, unless specified otherwise. Each model is compared to the best fitting single component model ($\\Delta$NLL and $\\Delta$NLL % columns). The negative log-likelihood value is given in the NLL column and AIC difference to the best fitting model in the $\\Delta$AIC column.")
+
+if(recompile_models & model_selection) {
+  
+  modsel_tab <- 
+    pbapply::pblapply(seq_along(model_selection_models), function(i) {
+      if(inherits(model_selection_models[[i]], "try-error")) {
+        tibble(
+          species = case_when(
+            model_list$commonname[i] == "snabeluer" ~ "Beaked redfish", 
+            model_list$commonname[i] == "vanlig uer" ~ "Golden redfish"
+          ),
+          model = model_list$name[i],
+          formula = paste(trimws(format(model_list$formula[[i]])), 
+                          collapse = ""),
+          spatial = model_list$spatial[[i]],
+          spatiotemporal = model_list$spatiotemporal[[i]],
+          crashed = TRUE,
+          converged = FALSE,
+          sanity = FALSE,
+          loglik = NA,
+          AIC = NA
+        )
+      } else {
+        tibble(
+          species = case_when(
+            model_list$commonname[i] == "snabeluer" ~ "Beaked redfish", 
+            model_list$commonname[i] == "vanlig uer" ~ "Golden redfish"
+          ),
+          model = model_list$name[i],
+          formula = paste(trimws(format(
+            model_selection_models[[i]]$models[[1]]$formula[[1]])), 
+            collapse = ""),
+          spatial = unique(model_selection_models[[i]]$models[[1]]$spatial),
+          spatiotemporal = unique(
+            model_selection_models[[i]]$models[[1]]$spatiotemporal),
+          crashed = FALSE,
+          converged = model_selection_models[[i]]$converged,
+          sanity = all(unlist(sanity(model_selection_models[[i]]$models[[1]],
+                                     silent = TRUE))),
+          loglik = model_selection_models[[i]]$sum_loglik,
+          AIC = median(sapply(model_selection_models[[i]]$models, AIC))
+        )
+      }
+    }, cl = n_cores) %>% 
+    bind_rows() %>% 
+    group_by(species) %>% 
+    arrange(-loglik) %>% 
+    mutate(
+      deltaNLL = loglik - max(loglik, na.rm = TRUE),
+      deltaNLL_pr = 100*(1-loglik/max(loglik, na.rm = TRUE)),
+      deltaAIC = AIC - min(AIC, na.rm = TRUE),
+      deltaAIC_pr = 100*(AIC/min(AIC, na.rm = TRUE) - 1)
+    ) %>% 
+    ungroup()
+  
+  ## Save
+  write_csv(
+    modsel_tab,
+    file =
+      paste0("data/model_output/model_selection/Model-selection-table-", 
+             gsub("\\(.*\\)", "", model_family_name),
+             ".csv")
+  )
+} else {
+  modsel_tab <- read_csv(
+    paste0("data/model_output/model_selection/Model-selection-table-", 
+           gsub("\\(.*\\)", "", model_family_name),
+           ".csv")
+  )
+}
+
+## Print the table
+modsel_tab %>% 
+  relocate(formula, .after = last_col()) %>%
+  dplyr::select(-spatial, -spatiotemporal, -AIC, -deltaAIC_pr) %>% 
+  mutate(loglik = abs(loglik), 
+         deltaNLL = abs(deltaNLL),
+         deltaNLL_pr = abs(deltaNLL_pr)) %>% 
+  rename(
+    "Species" = "species", "Model" = "model", "Formula" = "formula", 
+    "Crashed" = "crashed", "Converged" = "converged", "Sanity test" = "sanity", 
+    "NLL" = "loglik", "ΔNLL" = "deltaNLL", "ΔNLL %" =  "deltaNLL_pr", 
+    "ΔAIC" = "deltaAIC"
+  ) %>% 
+  make_table(digits = c(0,0,0,0,0,0,0,2,0,0))
+
+# More compact alternative:
+# modsel_tab %>% 
+#   mutate(deltaNLL = abs(deltaNLL)) %>% 
+#   dplyr::select(species, model, formula, sanity, deltaNLL) %>%
+#   ungroup() %>% 
+#   pivot_wider(id_cols = c(model, formula, sanity), 
+#               names_from = species,
+#               values_from = deltaNLL) %>% 
+#   filter(!model %in% "Full model s(logdepth)") %>% 
+#   rename("Model" = "model", "Formula" = "formula", 
+#          "Sanity test" = "sanity") %>%
+#   make_table(digits = 2)
+
+```
+
+```{r}
+#| label: fig-model-selection
+#| fig-cap: !expr paste("Model selection for", sp_name, "based on ten-fold cross-validation. The y-axis lists the model. The x-axis shows the negative log-likelihood for each model, where higher values indicate better model fit. Symbol color and shape reflect model diagnostics; black circles denote models without issues, while grey symbols indicate models that failed the sanity check or did not converge.")
+
+tmp <- modsel_tab %>%
+  group_by(species) %>% 
+  mutate(status = case_when(
+    !sanity & !converged ~ "Nonconvergent &\nsanity test issues",
+    !sanity ~ "Sanity test issues",
+    !converged ~ "Nonconvergent",
+    .default = "All OK"
+  ), .after = "sanity") %>% 
+  mutate(deltaNLL = abs(loglik - max(loglik, na.rm = TRUE))) %>% 
+  mutate(deltaNLL = abs(ifelse(crashed, Inf, deltaNLL))) %>% 
+  rename("value" = "deltaNLL") %>% 
+  ungroup()
+
+tmp <- tmp %>% 
+  mutate(
+    model = factor(
+      model,
+      levels = tmp %>% 
+        group_by(model) %>% reframe(value = mean(value)) %>% 
+        arrange(value) %>% pull(model) %>% rev())
+  )
+
+ggplot(tmp, aes(y = model, x = value, color = status, shape = status)) +
+  geom_point(size = 3) +
+  scale_shape_manual(values = c(16,15,17,18)) +
+  scale_color_manual(values = c("black", rep("grey", 3))) +
+  facet_grid(~species, scales = "free") +
+  # scale_y_continuous(transform = "sqrt") + 
+  labs(x = "Negative log likelihood difference",
+       y = "Model", shape = "Model diagnostics", color = "Model diagnostics") +
+  theme(legend.position = "bottom",
+        panel.grid.major = element_line(color = "grey", linewidth = LS(0.5)))
+```
+
+## Survey indices
+
+```{r mod-sel-survey-indices}
+#| timeit: !expr if(recalculate_index & model_selection) TRUE else NULL
+
+if(run_index) {
+  if(recalculate_index & model_selection) {
+    
+    proj_dt <- read_rds("data/model_output/prediction-grid-data.rds") %>% 
+      distinct(X, Y, depth, year) 
+    
+    ## Prediction grid cell side length
+    grid_side_size <- attributes(proj_dt)$grid_side_size # kilometers due to UTM projection and division by 1000
+    
+    if(development_mode) {
+      proj_dt <- proj_dt %>% 
+        filter(year > 2003) %>% 
+        mutate(sample = rep(1:4, length.out = nrow(.))) %>% 
+        filter(sample == 1) %>% 
+        dplyr::select(-sample)
+    }
+    
+    models <- model_selection_models
+    
+    index <- pbapply::pblapply(seq_along(models), function(i) {
+      
+      # print(i)
+      
+      k <- models[[i]]
+      if(inherits(k, "try-error")) return(NULL)
+      k_name <- names(models)[i]
+      
+      terms <- trimws(unlist(strsplit(
+        as.character(k$models[[1]]$formula[[1]])[3], "\\+")))
+      terms <- terms[terms != "0"]
+      terms <- terms[!grepl(":", terms)]
+      
+      pred_dt <- proj_dt
+      
+      if(grepl("Null model", k_name)) {
+        pred_dt <- pred_dt %>% distinct(X, Y, year)
+      } else {
+        fyear <- any(grepl("fyear", terms))
+        geartype <- any(grepl("geartype", terms))
+        logdepth <- any(grepl("logdepth", terms))
+        cruiseseries <- any(grepl("cruiseseries", terms))
+        season <- any(grepl("season", terms))
+        depth <- any(grepl("depth", terms))
+        month <- any(grepl("month", terms))
+        smonth <- any(grepl("s\\(month\\)", terms))
+        yday <- any(grepl("yday", terms))
+        distance <- any(grepl("distance", terms))
+        commonname <- any(grepl("commonname", terms))
+        temperature <- any(grepl("temperature", terms))
+        
+        if(!any(c(depth, temperature))) pred_dt <- pred_dt %>% distinct(X, Y, year)
+        if(logdepth) pred_dt <- pred_dt %>% mutate(logdepth = log(depth))
+        if(geartype) pred_dt <- pred_dt %>% mutate(geartype = "Shrimp")
+        if(fyear) pred_dt <- pred_dt %>% mutate(fyear = as.factor(year))
+        if(season) pred_dt <- pred_dt %>% mutate(season = "H2")
+        if(month) {pred_dt <- pred_dt %>% 
+          replicate_df("month", if(smonth) as.integer(8) else factor(8))}
+        if(yday) pred_dt <- pred_dt %>% mutate(yday = 225)
+        if(distance) pred_dt <- pred_dt %>% mutate(distance = 1) # assuming 3 knot trawling speed for 20 min
+        
+        if(include_temperature & temperature) {
+          
+          ### Temperature model ###
+          load("data/model_output/temperature-model-fit.rda")
+          
+          ## Predict using the data
+          
+          pred_dt <- predict(
+            fit[[1]]$mod,
+            newdata = pred_dt %>% 
+              mutate(fyear = as.factor(year),
+                     month = as.integer(8)),
+            type = "response",
+            model = NA,
+            return_tmb_object = FALSE) %>% 
+            dplyr::select(-est_non_rf, -est_rf, -omega_s, -epsilon_st) %>% 
+            rename("temperature" = "est") 
+          
+          if(!smonth) {
+            pred_dt <- pred_dt %>% mutate(month = factor(month))
+          }
+        }
+        
+      }
+      
+      ## Slower more official way with CIs
+      # lapply(seq_along(k$models), function(j) {
+      #   predict(k$models[[j]], newdata = proj_dt, type = "response", model = NA,
+      #           return_tmb_object = TRUE) %>% 
+      #     get_index(
+      #       bias_correct = FALSE,
+      #       area = (grid_side_size/1.852)^2) %>% # grid cell area in square nautical miles
+      #     mutate(est = est/1e6, # convert kg to kilotonnes
+      #            lwr = lwr/1e6,
+      #            upr = upr/1e6, 
+      #            cv = sqrt(exp(se^2) - 1)) %>% 
+      #     mutate(model = k_name, .before = 1) %>% 
+      #     mutate(fold = j)
+      # }) %>% 
+      #   bind_rows()
+      
+      ## Quicker way
+      mod_pred <- 
+        lapply(seq_along(k$models), function(j) {
+          predict(k$models[[j]], newdata = pred_dt, type = "response", 
+                  model = NA, return_tmb_object = FALSE) %>%
+            mutate(fold = j)
+        })
+      
+      mod_pred %>%
+        bind_rows() %>%
+        group_by(fold, year, X, Y) %>%
+        reframe(est = mean(est)) %>%
+        group_by(fold, year) %>%
+        reframe(
+          # Y = weighted.mean(Y, est),
+          # X = weighted.mean(X, est),
+          # depth = weighted.mean(depth, est),
+          est = (sum(est)*(grid_side_size/1.852)^2)/1e6
+        ) %>%
+        mutate(lwr = NA, upr = NA, cv = NA, se = NA) %>%
+        mutate(commonname = unique(k$data$commonname),
+               model = k_name, 
+               .before = 1)
+    }, cl = n_cores)
+    
+    names(index) <- names(models)
+    
+    write_rds(
+      index,
+      file =
+        paste0("data/model_output/model_selection/Model-selection-indices-", 
+               gsub("\\(.*\\)", "", model_family_name),
+               ".rds"), 
+      compress = "xz"
+    )
+    
+    ms_indices <- index
+    
+  } else {
+    
+    proj_dt <- read_rds("data/model_output/prediction-grid-data.rds") %>% 
+      distinct(X, Y, depth, year)
+    
+    ms_indices <- read_rds(
+      paste0("data/model_output/model_selection/Model-selection-indices-", 
+             gsub("\\(.*\\)", "", model_family_name),
+             ".rds"), 
+    ) 
+  }
+}
+```
+
+```{r}
+#| code-fold: true
+#| label: fig-mod-sel-index
+#| fig-height: !expr ceiling(length(ms_indices)/3)*2.5
+#| fig-cap: !expr paste0("Survey indices estimated using multiple-component models for ", sp_name, " using spatiotemporal generalized linear mixed effects models with the sdmTMB package (colored solid line). Black lines with shading indicate the full biomass models with multiple components; 0 + geartype + s(month) + s(depth) + s(temperature). ", value_text_name, " is used as the response variable, and the models use meshes with ", paste(sapply(model_selection_mesh, function(k) k$mesh$n), collapse = " and "), " vertices (knots), as well as ", model_family_name," model family. Predictions are made to a grid with ", proj_dt %>% distinct(X,Y) %>% nrow(), " cells with a side of ", attributes(proj_dt)$grid_side_size, " km. Each line represents one fold from the 10-fold cross-validation. See Table 1 for more detailed model specification.")
+
+if(run_index) {
+  tmp <- lapply(ms_indices, function(k) {
+    if(inherits(k, "try-error")) return(NULL)
+    if(any(!is.na(k$upr))) {
+      if(max(k$upr, na.rm = TRUE) > 2*max(k$est, na.rm = TRUE)) {
+        k[k$upr > 1.5*max(k$est, na.rm = TRUE),]$upr <- 
+          ceiling(1.5*max(k$est, na.rm = TRUE))
+      }}
+    k
+  }) %>%
+    bind_rows() %>% 
+    filter(!is.na(year)) %>% 
+    mutate(model = gsub("_snabeluer|_vanlig uer", "", model)) %>% 
+    # mutate(model = factor(model, levels = names(ms_indices))) %>% 
+    mutate(
+      species = case_when(
+        commonname == "snabeluer" ~ "Beaked redfish", 
+        commonname == "vanlig uer" ~ "Golden redfish"
+      ),
+      .after = "commonname")
+  
+  load("data/model_output/index-bm.rda")
+  
+  index <- index %>% 
+    bind_rows() %>% 
+    rename("species" = "length_group")
+  
+  cowplot::plot_grid(
+    plotlist = 
+      lapply(unique(tmp$species), function(k) {
+        ggplot() +
+          geom_ribbon(
+            data = index %>% filter(species == k),
+            aes(year, est, ymin = lwr, ymax = upr), alpha = 0.3, color = NA, 
+            fill = "grey") +
+          geom_path(
+            data = index %>% filter(species == k),
+            aes(year, est), alpha = 0.5) +
+          geom_path(
+            data = tmp %>% filter(species == k),
+            aes(year, est, color = model, group = fold), alpha = 0.5) +
+          facet_wrap(~model, scales = "free") + 
+          coord_cartesian(expand = FALSE, ylim = c(0, NA)) +
+          scale_x_continuous(
+            breaks = seq(1980, 2030, 4),
+            labels = substr(seq(1980, 2030, 4),3,4)
+          ) +
+          labs(
+            x = 'Year',
+            y = ifelse(model_type == "Biomass", 'Biomass (kt)', 
+                       'Abundance (millions)')
+          ) +
+          theme_bw() +
+          theme(legend.position = "none")
+      }),
+    labels = unique(tmp$species), ncol = 1
+  )
+}
+```
+
+# Family selection
+
+The best fitting model 'No year' with formula rho_biomass ~ 0 + geartype + s(month) + s(depth) + s(temperature), and ar1 spatiotemporal random fields were used in testing the model family influence on survey indices. We tested [delta lognormal, delta gamma](https://pbs-assess.github.io/sdmTMB/articles/delta-models.html), [delta gamma poisson link](https://pbs-assess.github.io/sdmTMB/articles/poisson-link.html) [@thorson2018], and [tweedie](https://pbs-assess.github.io/sdmTMB/articles/model-description.html#tweedie) distribution families:
+
+```{r family-selection}
+#| timeit: !expr if(recompile_models & family_selection) TRUE else NULL
+
+if(recompile_models & family_selection) {
+  
+  model_family_list <- list(
+    "delta_lognormal" = sdmTMB::delta_lognormal(), 
+    "delta_gamma" = sdmTMB::delta_gamma(),
+    "poisson-link" = delta_gamma(type = "poisson-link"),
+    "tweedie" = sdmTMB::tweedie()
+  )
+  
+  future::plan("multisession", workers = n_sessions)
+  options(future.globals.maxSize = 1000 * 1024^2, future.seed = TRUE)
+  
+  saveRDS(model_family_list,
+          file = paste0(
+            "data/model_output/model_selection/Model-family-comparison-list-",
+             switch(response_variable, 
+                    "catch biomass" = "cw", 
+                    "biomass density" = "bm", 
+                    "catch abundance" = "cc", 
+                    "abundance density" = "ab"),
+             ".rds")
+          )
+  
+  ## Fit the models 
+  
+  message("Model fitting")
+  
+  model_family_models <- 
+    pbapply::pblapply(unique(dt$commonname), function(k) {
+      
+      set.seed(7) # to make the mesh creation consequent
+      
+      x <- dt %>% 
+        filter(commonname == k) %>% 
+        droplevels()
+      
+      mesh <- make_mesh(x, xy_cols = c("X", "Y"), cutoff = mesh_cutoff)
+      
+      models <- pbapply::pblapply(
+        seq_along(model_family_list), function(j) {
+          out <- try({
+            sdmTMB(
+              value ~ 0 + geartype + s(month) + s(depth) + s(temperature),
+              data = x,
+              mesh = mesh,
+              family = model_family_list[[j]],
+              spatial = "on",
+              spatiotemporal = 'ar1',
+              time = "year",
+              control = sdmTMBcontrol(newton_loops = 2)
+            )
+          })
+          
+          if(inherits(out, "try-error")) {
+            warning(paste(paste(k, names(model_family_list[j]), 
+                                sep = "_"), "crashed"))
+          }
+          
+          # Save / return
+          if(segmental_save) {
+            saveRDS(
+              out,
+              file =
+                paste0(
+                  "data/model_output/model_selection/Family-selection-models-",
+                  paste(k, 
+                        gsub(" ", "-", names(model_family_list[j])),
+                        sep = "_"),
+                  ".rds"),
+              compress = "xz"
+            )
+          } else {
+            return(out)
+          }   
+        }, cl = length(model_family_list)
+      )
+      
+      # Load and make objects
+      
+      if(segmental_save) {
+        models <- 
+          pbapply::pblapply(seq_along(model_family_list), function(j) {
+            readRDS(
+              file =
+                paste0(
+                  "data/model_output/model_selection/Family-selection-models-",
+                  paste(k, 
+                        gsub(" ", "-", names(model_family_list[j])),
+                        sep = "_"),
+                  ".rds")
+            )
+          })
+      }
+      
+      models <- setNames(models, names(model_family_list))
+      
+      list(
+        models = models, model_families = names(model_family_list),
+        species = k, mesh = mesh, mesh_n = mesh$mesh$n, 
+        mesh_cutoff = mesh_cutoff, crs = dt_crs)
+    }) 
+  
+  model_family_models <- 
+    setNames(
+      model_family_models, 
+      recode(unique(dt$commonname), 
+             "snabeluer" = "Beaked redfish", "vanlig uer" = "Golden redfish")
+    )
+  
+  attributes(model_family_models) <- 
+    c(attributes(model_family_models),
+      list(
+        response_variable = response_variable, 
+        value_name = value_name,
+        value_text_name = value_text_name,
+        value_text_unit = value_text_unit)
+    )
+  
+  message("Save")
+  
+  if(save_model_output) {
+    saveRDS(
+      model_family_models, 
+      file = 
+        paste0("data/model_output/model_selection/Family-selection-models-",
+             switch(response_variable, 
+                    "catch biomass" = "cw", 
+                    "biomass density" = "bm", 
+                    "catch abundance" = "cc", 
+                    "abundance density" = "ab"),
+             ".rds"),
+      compress = "xz"
+    )
+  }
+  
+  family_selection_params <- 
+    list(
+      formula = format(model_family_models[[1]]$models[[1]]$formula[[1]]),
+      spatiotemporal = unique(model_family_models[[1]]$models[[1]]$spatiotemporal)
+    )
+  
+  saveRDS(
+    family_selection_params,
+    file = 
+      paste0("data/model_output/model_selection/Family-selection-parameters-",
+             switch(response_variable, 
+                    "catch biomass" = "cw", 
+                    "biomass density" = "bm", 
+                    "catch abundance" = "cc", 
+                    "abundance density" = "ab"),
+             ".rda")
+  )
+  
+} else {
+  family_selection_params <- 
+    readRDS(
+      paste0(
+        "data/model_output/model_selection/Family-selection-parameters-",
+             switch(response_variable, 
+                    "catch biomass" = "cw", 
+                    "biomass density" = "bm", 
+                    "catch abundance" = "cc", 
+                    "abundance density" = "ab"),
+             ".rda")
+    )
+  
+  model_family_list <-
+    readRDS(
+      paste0(
+        "data/model_output/model_selection/Model-family-comparison-list-",
+             switch(response_variable, 
+                    "catch biomass" = "cw", 
+                    "biomass density" = "bm", 
+                    "catch abundance" = "cc", 
+                    "abundance density" = "ab"),
+             ".rds")
+    )
+}
+```
+
+```{r}
+#| label: tbl-family-selection
+#| timeit: !expr if(recompile_models & family_selection) TRUE else NULL
+#| tbl-cap: !expr paste0("Comparison of model families using the ",  family_selection_params$formula, " formula and ", family_selection_params$spatiotemporal, " spatiotemporal random fields. The table presents the negative log-likelihood (NLL) and Akaike Information Criterion (AIC) values, along with their differences among model family alternatives for each species. The Sanity column reports the results of the sdmTMB::sanity_test() function, which ensures convergence, a positive definite Hessian matrix, and small parameter gradients.")
+
+if(recompile_models & family_selection) {
+  
+  modtab <- lapply(seq_along(model_family_models), function(i) {
+    lapply(seq_along(model_family_models[[i]]$models), function(j) {
+      tibble(
+        commonname = model_family_models[[i]]$species,
+        family = names(model_family_models[[i]]$models[j]),
+        formula = format(model_family_models[[i]]$models[[j]]$formula[[1]]),
+        spatiotemporal = unique(model_family_models[[i]]$models[[j]]$spatiotemporal),
+        converged = model_family_models[[i]]$models[[j]]$model$convergence == 0,
+        sanity = all(unlist(sanity(model_family_models[[i]]$models[[j]], 
+                                   silent = TRUE))),
+        NLL = round(c(model_family_models[[i]]$models[[j]]$model$objective), 1),
+        AIC = AIC(model_family_models[[i]]$models[[j]])
+      )
+    }) %>% 
+      bind_rows() %>% 
+      mutate(species = names(model_family_models[i]), .before = 1)
+  }) %>% 
+    bind_rows() %>% 
+    group_by(species) %>% 
+    mutate(deltaNLL = NLL - min(NLL),
+           deltaAIC = AIC - min(AIC)) %>% 
+    arrange(species, deltaNLL)
+  
+  write_delim(
+    modtab,
+    file = 
+      paste0("data/model_output/model_selection/Family-selection-table-",
+             switch(response_variable, 
+                    "catch biomass" = "cw", 
+                    "biomass density" = "bm", 
+                    "catch abundance" = "cc", 
+                    "abundance density" = "ab"),
+             ".txt")
+  )
+} else {
+  modtab <- read_delim(
+    paste0("data/model_output/model_selection/Family-selection-table-",
+           switch(response_variable, 
+                  "catch biomass" = "cw", 
+                  "biomass density" = "bm", 
+                  "catch abundance" = "cc", 
+                  "abundance density" = "ab"),
+           ".txt")
+  )
+}
+
+## Table
+
+## Print
+modtab %>% 
+  dplyr::select(-formula, -spatiotemporal) %>% 
+  rename_with(~sub("(^[[:alpha:]])", "\\U\\1", .x, perl = TRUE)) %>% 
+  rename("ΔNLL" = "DeltaNLL",
+         "ΔAIC" =  "DeltaAIC") %>% 
+  knitr::kable(escape = FALSE, digits = 0) %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "condensed"))
+```
+
+```{r}
+#| label: fig-family-selection
+#| fig-cap: "Negative log-likelihood difference among model families for each species from Table 1. The x-axis shows the negative log-likelihood for each model, where higher values indicate better model model_family_models. Symbol color and shape reflect model diagnostics: black circles denote models without issues, while grey symbols indicate models that failed the sanity check or did not converge."
+
+modtab %>%
+  mutate(family = factor(family, levels = rev(unique(.$family)))) %>% 
+  mutate(status = case_when(
+    !sanity & !converged ~ "Nonconvergent &\nsanity test issues",
+    !sanity ~ "Sanity test issues",
+    !converged ~ "Nonconvergent",
+    .default = "All OK"
+  ), .after = "sanity") %>% 
+  ggplot(aes(family, deltaNLL, shape = status, color = status)) + 
+  geom_point(size = 3) +
+  coord_flip() + 
+  scale_shape_manual(values = c(16,15,17)) +
+  scale_color_manual(values = c("black", rep("grey", 3))) +
+  facet_wrap(~ species, axes = "all", axis.labels = "margins") +
+  labs(y = "Negative log likelihood difference",
+       x = "Model family", shape = "Model diagnostics", 
+       color = "Model diagnostics") +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+#| label: fig-resid-qq
+#| fig-height: !expr 3.5*ceiling(length(model_family_list)/2)
+#| timeit: !expr if(recompile_models & family_selection) TRUE else NULL
+#| results: hide
+#| fig-cap: Quantile–quantile plots for beaked (left) and golden redfish (right) model families. Model families are arranged in rows, with submodels displayed in columns.
+
+if(recompile_models & family_selection) {
+  set.seed(12)
+  
+  qq_dat <- 
+    pbapply::pblapply(seq_along(model_family_models), function(j) {
+      pbapply::pblapply(seq_along(model_family_models[[j]]$models), function(i) {
+        lapply(seq_along(
+          model_family_models[[j]]$models[[i]]$family$family), function(l) {
+            rq_res <- residuals(model_family_models[[j]]$models[[i]], 
+                                type = "mle-mvn", model = l)
+            rq_res <- rq_res[is.finite(rq_res)] # some Inf
+            tibble(
+              species = names(model_family_models[j]),
+              family = names(model_family_models[[j]]$models)[i],
+              model = model_family_models[[j]]$models[[i]]$family$family[l],
+              x = rq_res
+            )
+          }) %>% bind_rows()
+      }, cl = length(model_family_models[[j]]$models)) %>% 
+        bind_rows() %>% 
+        mutate(family = factor(family, levels = unique(modtab$family)))
+    }) 
+  
+  # Save
+  
+  saveRDS(
+    qq_dat, 
+    file = paste0(
+      "data/model_output/model_selection/Family-selection-residuals-",
+      switch(response_variable, 
+             "catch biomass" = "cw", 
+             "biomass density" = "bm", 
+             "catch abundance" = "cc", 
+             "abundance density" = "ab"),
+      ".rds"),
+    compress = "xz"
+  )
+} else {
+  qq_dat <- readRDS(
+    paste0(
+      "data/model_output/model_selection/Family-selection-residuals-",
+      switch(response_variable, 
+             "catch biomass" = "cw", 
+             "biomass density" = "bm", 
+             "catch abundance" = "cc", 
+             "abundance density" = "ab"),
+      ".rds")
+  )
+}
+
+cowplot::plot_grid(
+  plotlist = 
+    lapply(qq_dat, function(k) {
+      k %>% 
+        ggplot(aes(sample = x)) +
+        geom_qq_line() +
+        geom_qq(shape = 21, color = "grey60") +
+        facet_wrap(~family + model, ncol = 2) +
+        labs(
+          title = unique(k$species),
+          x = "Theoretical Quantiles",
+          y = "Sample Quantiles"
+        )
+    }),
+  ncol = 2
+)
+```
+
+## Survey indices
+
+```{r fam-sel-survey-indices}
+#| timeit: !expr if(recalculate_index & family_selection) TRUE else NULL
+
+if(run_index) {
+  if(recalculate_index & family_selection) {
+    
+    proj_dt <- read_rds("data/model_output/prediction-grid-data.rds") %>% 
+      distinct(X, Y, depth, year)
+    
+    grid_side_size <- attributes(proj_dt)$grid_side_size # kilometers due to UTM projection and division by 1000
+    
+    index <- pbapply::pblapply(seq_along(model_family_models), function(i) {
+      print(i)
+      pbapply::pblapply(seq_along(model_family_models[[i]]$models), function(j) {
+        print(j)
+        k <- model_family_models[[i]]$models[[j]]
+        k_name <- names(model_family_models[[i]]$models[j])
+        k_sp <- names(model_family_models[i])
+        
+        pred_dt <- proj_dt
+        
+        terms <- trimws(unlist(strsplit(as.character(k$formula[[1]])[3], "\\+")))
+        terms <- terms[terms != "0"]
+        terms <- terms[!grepl(":", terms)]
+        
+        fyear <- any(grepl("fyear", terms))
+        logdepth <- any(grepl("logdepth", terms))
+        cruiseseries <- any(grepl("cruiseseries", terms))
+        geartype <- any(grepl("geartype", terms))
+        season <- any(grepl("season", terms))
+        depth <- any(grepl("depth", terms))
+        month <- any(grepl("month", terms))
+        smonth <- any(grepl("s\\(month\\)", terms))
+        yday <- any(grepl("yday", terms))
+        distance <- any(grepl("distance", terms))
+        commonname <- any(grepl("commonname", terms))
+        temperature <- any(grepl("temperature", terms))
+        
+        if(!any(c(depth, temperature))) pred_dt <- pred_dt %>% distinct(X, Y, year)
+        if(logdepth) pred_dt <- pred_dt %>% mutate(logdepth = log(depth))
+        if(geartype) pred_dt <- pred_dt %>% mutate(geartype = "Shrimp")
+        if(fyear) pred_dt <- pred_dt %>% mutate(fyear = as.factor(year))
+        if(season) pred_dt <- pred_dt %>% mutate(season = "H2")
+        if(month) {pred_dt <- pred_dt %>% 
+          replicate_df("month", if(smonth) as.integer(8) else factor(8))}
+        if(yday) pred_dt <- pred_dt %>% mutate(yday = 225)
+        if(distance) pred_dt <- pred_dt %>% mutate(distance = 1) # assuming 3 knot trawling speed for 20 min
+        
+        if(include_temperature & temperature) {
+          
+          ### Temperature model ###
+          load("data/model_output/temperature-model-fit.rda")
+          
+          ## Predict using the data
+          
+          pred_dt <- predict(
+            fit[[1]]$mod,
+            newdata = pred_dt %>% 
+              mutate(fyear = as.factor(year),
+                     month = as.integer(8)),
+            type = "response",
+            model = NA,
+            return_tmb_object = FALSE) %>% 
+            dplyr::select(-est_non_rf, -est_rf, -omega_s, -epsilon_st) %>% 
+            rename("temperature" = "est") 
+          
+          if(!smonth) {
+            pred_dt <- pred_dt %>% mutate(month = factor(month))
+          }
+          
+        }
+        
+        
+        if(FALSE) {# Time consuming alternative. Takes hours to days, and tends to crash.
+          mod_pred <- 
+            predict(k, newdata = pred_dt, type = "response", model = NA,
+                    return_tmb_object = TRUE) 
+          
+          get_index(
+            obj = mod_pred,
+            bias_correct = TRUE,
+            area = (grid_side_size/1.852)^2) %>% # grid cell area in square nautical miles
+            mutate(est = est/1e6, # convert kg to kilotonnes
+                   lwr = lwr/1e6,
+                   upr = upr/1e6, 
+                   cv = sqrt(exp(se^2) - 1)) %>% 
+            mutate(
+              species = k_sp,
+              family = k_name, 
+              .before = 1)
+        } else { # Quick alternative, no CIs
+          
+          mod_pred <- 
+            predict(k, newdata = pred_dt, type = "response", model = NA,
+                    return_tmb_object = FALSE) 
+          
+          mod_pred %>%
+            bind_rows() %>%
+            group_by(year, X, Y) %>%
+            reframe(est = mean(est)) %>%
+            group_by(year) %>%
+            reframe(
+              # Y = weighted.mean(Y, est),
+              # X = weighted.mean(X, est),
+              # depth = weighted.mean(depth, est),
+              est = (sum(est)*(grid_side_size/1.852)^2)/1e6
+            ) %>%
+            mutate(lwr = NA, upr = NA, cv = NA, se = NA) %>%
+            mutate(
+              species = k_sp,
+              family = k_name,
+              .before = 1)
+        }
+      },
+      cl = length(model_family_list)
+      ) %>% bind_rows()
+    }, cl = 2) 
+    
+    names(index) <- names(model_family_models)
+    
+    write_rds(
+      index,
+      file =
+        paste0(
+          "data/model_output/model_selection/Family-selection-indices-",
+          switch(response_variable, 
+                 "catch biomass" = "cw", 
+                 "biomass density" = "bm", 
+                 "catch abundance" = "cc", 
+                 "abundance density" = "ab"),
+          ".rds")
+    )
+    
+    fs_indices <- index
+  } else {
+    proj_dt <- read_rds("data/model_output/prediction-grid-data.rds") %>% 
+      distinct(X, Y, depth, year)
+    
+    fs_indices <- read_rds(
+      paste0(
+        "data/model_output/model_selection/Family-selection-indices-",
+        switch(response_variable, 
+               "catch biomass" = "cw", 
+               "biomass density" = "bm", 
+               "catch abundance" = "cc", 
+               "abundance density" = "ab"),
+        ".rds")
+    )
+  }
+}
+```
+
+```{r}
+#| label: fig-fam-sel-index
+#| fig-height: 6
+#| fig-cap: !expr paste0("Survey index for the two redfish species depending on selected model family. Colored lines indicate alternative models", ifelse(any(!is.na(fs_indices[[1]]$upr)), " and shading 95% confidence intervals.", ".")) 
+
+if(run_index) {
+  tmp <- lapply(fs_indices, function(k) {
+    if(any(!is.na(k$upr))) {
+      if(max(k$upr, na.rm = TRUE) > 2*max(k$est, na.rm = TRUE)) {
+        k[k$upr > 1.5*max(k$est, na.rm = TRUE),]$upr <- 
+          ceiling(1.5*max(k$est, na.rm = TRUE))
+      }}
+    k
+  }) %>%
+    bind_rows() 
+  
+  tmp %>% 
+    ggplot(aes(year, est, color = family, fill = family)) +
+    geom_ribbon(aes(ymin = lwr, ymax = upr), color = NA, alpha = 0.5) +
+    geom_path() +
+    facet_wrap(~species, scale = "free_y", ncol = 1) +
+    scale_x_continuous(
+      breaks = seq(1980, 2030, 4),
+      labels = substr(seq(1980, 2030, 4),3,4)
+    ) +
+    # coord_cartesian(expand = FALSE, ylim = c(0, 1.05*max(tmp$est, na.rm = TRUE))) +
+    labs(
+      x = 'Year',
+      y = ifelse(model_type == "Biomass", 'Biomass (kt)', 
+                 'Abundance (millions)'),
+      color = "Model\nfamily", fill = "Model\nfamily"
+    ) +
+    theme_bw() +
+    theme(legend.position = "bottom")
+}
+```
+
+# Spatiotemporal field selection
+
+The best fitting model 'No year' with formula rho_biomass ~ 0 + geartype + s(month) + s(depth) + s(temperature), and delta lognormal model family were used to rank spatiotemporal random field structures. 
+
+```{r spatiotemporal-selection}
+#| code-fold: true
+#| warning: false
+#| message: false
+#| results: hide
+#| timeit: !expr if(recompile_models & spatiotemporal_selection) TRUE else NULL
+
+if(recompile_models & spatiotemporal_selection) {
+  
+  spatiotemporal_list <- tibble(
+    name = c(
+      "Independent",
+      "Autoregressive",
+      "Random walk",
+      "Off"
+    ),
+    spatiotemporal = c(
+      "iid",
+      "ar1",
+      "rw",
+      "off"
+    )
+  )
+  
+  spatiotemporal_list <- spatiotemporal_list %>% 
+    replicate_df("commonname", levels(dt$commonname)) %>% 
+    relocate("commonname", .before = 1)
+  
+  if(!dir.exists("data/model_output/model_selection")) {
+    dir.create("data/model_output/model_selection")
+  }
+  
+  saveRDS(spatiotemporal_list, 
+          file = "data/model_output/model_selection/spatiotemporal_list.rds")
+  
+  future::plan("multisession", workers = n_sessions)
+  options(future.globals.maxSize = 1000 * 1024^2, future.seed = TRUE)
+  
+  ## Fit the models 
+  
+  message("Cross-validation (takes an hour on a powerful computer)")
+  
+  tmp <- pbapply::pblapply(1:nrow(spatiotemporal_list), function(i) {
+    
+    x <- dt %>% 
+      filter(commonname == spatiotemporal_list$commonname[i]) %>%
+      arrange(stationstartdate, year, missionid, serialnumber) %>% 
+      droplevels()
+    
+    spatiotemporal_mesh <- make_mesh(x, xy_cols = c("X", "Y"), 
+                                     cutoff = mesh_cutoff)
+    clust <- sample(seq_len(10), size = nrow(x), replace = TRUE)
+    
+    out <- try({
+      sdmTMB_cv(
+        formula(value ~ 0 + geartype + s(month) + s(depth) + s(temperature)),
+        data = x,
+        mesh = spatiotemporal_mesh,
+        fold_ids = clust,
+        family = model_family,
+        spatial = "on",
+        spatiotemporal = spatiotemporal_list$spatiotemporal[[i]],
+        time = "year",
+        control = sdmTMBcontrol(newton_loops = 2)
+      )
+    })
+    
+    if(inherits(out, "try-error")) {
+      warning(paste(paste(spatiotemporal_list$commonname, 
+                          spatiotemporal_list$name, sep = "_")[i], "crashed"))
+    }
+    
+    # Save / return
+    if(segmental_save) {
+      saveRDS(
+        list(mod = out, mesh = spatiotemporal_mesh),
+        file =
+          paste0(
+          "data/model_output/model_selection/Spatiotemporal-selection-models-",
+                 gsub("\\(.*\\)", "", model_family_name), "_",
+                 paste(spatiotemporal_list$commonname, gsub(" ", "-", spatiotemporal_list$name), sep = "_")[i],
+                 ".rds"),
+        compress = "xz"
+      )
+    } else {
+      return(list(mod = out, mesh = spatiotemporal_mesh))
+    }
+  })
+  
+  # Load and make objects
+  
+  if(segmental_save) {
+    spatiotemporal_selection_models <- 
+      pbapply::pblapply(1:nrow(spatiotemporal_list), function(i) {
+        readRDS(
+          file =
+            paste0(
+            "data/model_output/model_selection/Spatiotemporal-selection-models-",
+                   gsub("\\(.*\\)", "", model_family_name), "_",
+                   paste(spatiotemporal_list$commonname, 
+                         gsub(" ", "-", spatiotemporal_list$name), sep = "_")[i],
+                   ".rds")
+        )$mod
+      })
+    
+    spatiotemporal_selection_models <- 
+      setNames(spatiotemporal_selection_models, 
+               paste(spatiotemporal_list$name, 
+                     spatiotemporal_list$commonname, sep = "_"))
+    
+    spatiotemporal_selection_mesh <- 
+      pbapply::pblapply(
+        unique(dt$commonname), function(k) {
+          readRDS(
+            dir("data/model_output/model_selection/", 
+                pattern = paste0("Spatiotemporal-selection-models-",
+                                 gsub("\\(.*\\)", "", model_family_name), "_", k),
+                full.names = TRUE)[1])$mesh
+        })
+  } else {
+    spatiotemporal_selection_models <- lapply(tmp, function(k) k$mod)
+    spatiotemporal_selection_models <- 
+      setNames(spatiotemporal_selection_models, 
+               paste(spatiotemporal_list$name, 
+                     spatiotemporal_list$commonname, sep = "_"))
+    
+    spatiotemporal_selection_mesh <- 
+      lapply(c(1,5), function(i) tmp[[i]]$mesh)
+    
+    spatiotemporal_selection_mesh <- 
+      setNames(spatiotemporal_selection_mesh, levels(dt$commonname))
+    
+    if(save_model_output) {
+      saveRDS(spatiotemporal_selection_models, 
+              file = paste0(
+                "data/model_output/model_selection/Spatiotemporal-selection-models-",
+                gsub("\\(.*\\)", "", model_family_name), ".rds"),
+              compress = "xz"
+      ) %>% system.time()
+    }
+    
+    saveRDS(spatiotemporal_selection_mesh,
+            file = paste0(
+              "data/model_output/model_selection/Spatiotemporal-selection-meshes-",
+              gsub("\\(.*\\)", "", model_family_name), ".rds"),
+            compress = "xz"
+    )  
+  }
+  
+  ## Save required components
+  spatiotemporal_selection_params <- 
+    list(
+      model_names = names(spatiotemporal_selection_models)
+    )
+  
+  saveRDS(
+    spatiotemporal_selection_params,
+    file = 
+      paste0(
+        "data/model_output/model_selection/Spatiotemporal-selection-parameters-",
+        gsub("\\(.*\\)", "", model_family_name), ".rds")
+  )
+  
+} else {
+  spatiotemporal_list <- 
+    readRDS(
+      file = "data/model_output/model_selection/spatiotemporal_list.rds")
+  
+  spatiotemporal_selection_mesh <- 
+    readRDS(paste0(
+      "data/model_output/model_selection/Spatiotemporal-selection-meshes-",
+      gsub("\\(.*\\)", "", model_family_name), ".rds")
+    )
+  
+  spatiotemporal_selection_params <-
+    readRDS(paste0(
+      "data/model_output/model_selection/Spatiotemporal-selection-parameters-",
+      gsub("\\(.*\\)", "", model_family_name), ".rds")
+    )
+}
+```  
+
+```{r}
+#| label: tbl-spatiotemporal-selection
+#| timeit: !expr if(recompile_models & spatiotemporal_selection) TRUE else NULL
+#| tbl-cap: !expr paste0("Ranking of spatiotemporal random fields for ", sp_name, " based on ten-fold cross-validation. The models contain spatial fields. Each model is compared to the best fitting single component model ($\\Delta$NLL and $\\Delta$NLL % columns). The negative log-likelihood value is given in the NLL column and AIC difference to the best fitting model in the $\\Delta$AIC column.")
+
+## Table
+if(recompile_models & spatiotemporal_selection) {
+  spatiotemporal_selection_tab <- 
+    pbapply::pblapply(seq_along(spatiotemporal_selection_models), function(i) {
+      if(inherits(spatiotemporal_selection_models[[i]], "try-error")) {
+        tibble(
+          species = case_when(
+            spatiotemporal_list$commonname[i] == "snabeluer" ~ "Beaked redfish", 
+            spatiotemporal_list$commonname[i] == "vanlig uer" ~ "Golden redfish"
+          ),
+          model = spatiotemporal_list$name[i],
+          formula = paste(trimws(format(spatiotemporal_list$formula[[i]])), 
+                          collapse = ""),
+          spatial = spatiotemporal_list$spatial[[i]],
+          spatiotemporal = spatiotemporal_list$spatiotemporal[[i]],
+          crashed = TRUE,
+          converged = FALSE,
+          sanity = FALSE,
+          loglik = NA,
+          AIC = NA
+        )
+      } else {
+        tibble(
+          species = case_when(
+            spatiotemporal_list$commonname[i] == "snabeluer" ~ "Beaked redfish", 
+            spatiotemporal_list$commonname[i] == "vanlig uer" ~ "Golden redfish"
+          ),
+          model = spatiotemporal_list$name[i],
+          formula = paste(trimws(
+            format(spatiotemporal_selection_models[[i]]$models[[1]]$formula[[1]])), 
+            collapse = ""),
+          spatial = unique(
+            spatiotemporal_selection_models[[i]]$models[[1]]$spatial),
+          spatiotemporal = unique(spatiotemporal_selection_models[[i]]$models[[1]]$spatiotemporal),
+          crashed = FALSE,
+          converged = spatiotemporal_selection_models[[i]]$converged,
+          sanity = all(unlist(sanity(
+            spatiotemporal_selection_models[[i]]$models[[1]],
+            silent = TRUE))),
+          loglik = spatiotemporal_selection_models[[i]]$sum_loglik,
+          AIC = median(sapply(spatiotemporal_selection_models[[i]]$models, AIC))
+        )
+      }
+    }, cl = n_cores) %>% 
+    bind_rows() %>% 
+    group_by(species) %>% 
+    arrange(-loglik) %>% 
+    mutate(
+      deltaNLL = loglik - max(loglik, na.rm = TRUE),
+      deltaNLL_pr = 100*(1-loglik/max(loglik, na.rm = TRUE)),
+      deltaAIC = AIC - min(AIC, na.rm = TRUE),
+      deltaAIC_pr = 100*(AIC/min(AIC, na.rm = TRUE) - 1)
+    ) %>% 
+    ungroup()
+  
+  ## Save
+  write_csv(
+    spatiotemporal_selection_tab,
+    file =
+      paste0("data/model_output/model_selection/Spatiotemporal-selection-table-", 
+             gsub("\\(.*\\)", "", model_family_name),
+             ".csv")
+  )
+} else {
+  spatiotemporal_selection_tab <- read_csv(
+    paste0("data/model_output/model_selection/Spatiotemporal-selection-table-", 
+           gsub("\\(.*\\)", "", model_family_name),
+           ".csv")
+  )
+}
+
+## Print the table
+spatiotemporal_selection_tab %>% 
+  relocate(formula, .after = last_col()) %>%
+  dplyr::select(-spatial, -spatiotemporal, -AIC, -deltaAIC_pr) %>% 
+  mutate(loglik = abs(loglik), 
+         deltaNLL = abs(deltaNLL),
+         deltaNLL_pr = abs(deltaNLL_pr)) %>% 
+  rename(
+    "Species" = "species", "Model" = "model", "Formula" = "formula", 
+    "Crashed" = "crashed", "Converged" = "converged", "Sanity test" = "sanity", 
+    "NLL" = "loglik", "ΔNLL" = "deltaNLL", "ΔNLL %" =  "deltaNLL_pr", 
+    "ΔAIC" = "deltaAIC"
+  ) %>% 
+  make_table(digits = c(0,0,0,0,0,0,0,1,0,0))
+
+# More compact alternative:
+# spatiotemporal_selection_tab %>% 
+#   mutate(deltaNLL = abs(deltaNLL)) %>% 
+#   dplyr::select(species, model, formula, sanity, deltaNLL) %>%
+#   ungroup() %>% 
+#   pivot_wider(id_cols = c(model, formula, sanity), 
+#               names_from = species,
+#               values_from = deltaNLL) %>% 
+#   filter(!model %in% "Full model s(logdepth)") %>% 
+#   rename("Model" = "model", "Formula" = "formula", 
+#          "Sanity test" = "sanity") %>%
+#   make_table(digits = 2)
+```
+
+```{r}
+#| label: fig-spatiotemporal-selection
+#| fig-cap: !expr paste("Ranking of spatiotemporal random fields", sp_name, "based on ten-fold cross-validation. The y-axis lists the model components. The x-axis shows the negative log-likelihood for each model, where higher values indicate better model fit. Symbol color and shape reflect model diagnostics; black circles denote models without issues, while grey symbols indicate models that failed the sanity check or did not converge.")
+
+tmp <- spatiotemporal_selection_tab %>%
+  group_by(species) %>% 
+  mutate(status = case_when(
+    !sanity & !converged ~ "Nonconvergent &\nsanity test issues",
+    !sanity ~ "Sanity test issues",
+    !converged ~ "Nonconvergent",
+    .default = "All OK"
+  ), .after = "sanity") %>% 
+  mutate(deltaNLL = abs(loglik - max(loglik, na.rm = TRUE))) %>% 
+  mutate(deltaNLL = abs(ifelse(crashed, Inf, deltaNLL))) %>% 
+  rename("value" = "deltaNLL") %>% 
+  ungroup()
+
+tmp <- tmp %>% 
+  mutate(
+    model = factor(
+      model,
+      levels = tmp %>% group_by(model) %>% reframe(value = mean(value)) %>% 
+        arrange(value) %>% pull(model) %>% rev())
+  )
+
+ggplot(tmp, aes(x = model, y = value, color = status, shape = status)) +
+  geom_point(size = 3) +
+  scale_shape_manual(values = c(16,15,17,18)) +
+  scale_color_manual(values = c("black", rep("grey", 3))) +
+  facet_grid(~species, scales = "free") +
+  coord_flip() + 
+  # scale_y_continuous(transform = "sqrt") + 
+  labs(y = "Negative log likelihood difference",
+       x = "Variable", shape = "Model diagnostics", 
+       color = "Model diagnostics") +
+  theme(legend.position = "bottom",
+        panel.grid.major = element_line(color = "grey", linewidth = LS(0.5)))
+```
+
+## Survey indices
+
+```{r spat-sel-survey-indices}
+#| timeit: !expr if(recalculate_index & spatiotemporal_selection) TRUE else NULL
+
+if(run_index) {
+  if(recalculate_index & spatiotemporal_selection) {
+    
+    proj_dt <- read_rds("data/model_output/prediction-grid-data.rds") %>% 
+      distinct(X, Y, depth, year) 
+    
+    ## Prediction grid cell side length
+    grid_side_size <- attributes(proj_dt)$grid_side_size # kilometers due to UTM projection and division by 1000
+    
+    if(development_mode) {
+      proj_dt <- proj_dt %>% 
+        filter(year > 2003) %>% 
+        mutate(sample = rep(1:4, length.out = nrow(.))) %>% 
+        filter(sample == 1) %>% 
+        dplyr::select(-sample)
+    }
+    
+    models <- spatiotemporal_selection_models
+    
+    index <- pbapply::pblapply(seq_along(models), function(i) {
+      
+      # print(i)
+      
+      k <- models[[i]]
+      if(inherits(k, "try-error")) return(NULL)
+      k_name <- names(models)[i]
+      
+      terms <- trimws(unlist(strsplit(
+        as.character(k$models[[1]]$formula[[1]])[3], "\\+")))
+      terms <- terms[terms != "0"]
+      terms <- terms[!grepl(":", terms)]
+      
+      pred_dt <- proj_dt
+      
+      if(grepl("Null model", k_name)) {
+        pred_dt <- pred_dt %>% distinct(X, Y, year)
+      } else {
+        fyear <- any(grepl("fyear", terms))
+        geartype <- any(grepl("geartype", terms))
+        logdepth <- any(grepl("logdepth", terms))
+        cruiseseries <- any(grepl("cruiseseries", terms))
+        season <- any(grepl("season", terms))
+        depth <- any(grepl("depth", terms))
+        month <- any(grepl("month", terms))
+        smonth <- any(grepl("s\\(month\\)", terms))
+        yday <- any(grepl("yday", terms))
+        distance <- any(grepl("distance", terms))
+        commonname <- any(grepl("commonname", terms))
+        temperature <- any(grepl("temperature", terms))
+        
+        if(!any(c(depth, temperature))) {
+          pred_dt <- pred_dt %>% distinct(X, Y, year)}
+        if(logdepth) pred_dt <- pred_dt %>% mutate(logdepth = log(depth))
+        if(geartype) pred_dt <- pred_dt %>% mutate(geartype = "Shrimp")
+        if(fyear) pred_dt <- pred_dt %>% mutate(fyear = as.factor(year))
+        if(season) pred_dt <- pred_dt %>% mutate(season = "H2")
+        if(month) {pred_dt <- pred_dt %>% 
+          replicate_df("month", if(smonth) as.integer(8) else factor(8))}
+        if(yday) pred_dt <- pred_dt %>% mutate(yday = 225)
+        if(distance) pred_dt <- pred_dt %>% mutate(distance = 1) # assuming 3 knot trawling speed for 20 min
+        
+        if(include_temperature & temperature) {
+          
+          ### Temperature model ###
+          load("data/model_output/temperature-model-fit.rda")
+          
+          ## Predict using the data
+          
+          pred_dt <- predict(
+            fit[[1]]$mod,
+            newdata = pred_dt %>% 
+              mutate(fyear = as.factor(year),
+                     month = as.integer(8)),
+            type = "response",
+            model = NA,
+            return_tmb_object = FALSE) %>% 
+            dplyr::select(-est_non_rf, -est_rf, -omega_s, -epsilon_st) %>% 
+            rename("temperature" = "est") 
+          
+          if(!smonth) {
+            pred_dt <- pred_dt %>% mutate(month = factor(month))
+          }
+        }
+        
+      }
+      
+      ## Slower more official way with CIs
+      # lapply(seq_along(k$models), function(j) {
+      #   predict(k$models[[j]], newdata = proj_dt, type = "response", model = NA,
+      #           return_tmb_object = TRUE) %>% 
+      #     get_index(
+      #       bias_correct = FALSE,
+      #       area = (grid_side_size/1.852)^2) %>% # grid cell area in square nautical miles
+      #     mutate(est = est/1e6, # convert kg to kilotonnes
+      #            lwr = lwr/1e6,
+      #            upr = upr/1e6, 
+      #            cv = sqrt(exp(se^2) - 1)) %>% 
+      #     mutate(model = k_name, .before = 1) %>% 
+      #     mutate(fold = j)
+      # }) %>% 
+      #   bind_rows()
+      
+      ## Quicker way
+      mod_pred <- 
+        lapply(seq_along(k$models), function(j) {
+          predict(k$models[[j]], newdata = pred_dt, type = "response", 
+                  model = NA,
+                  return_tmb_object = FALSE) %>%
+            mutate(fold = j)
+        })
+      
+      mod_pred %>%
+        bind_rows() %>%
+        group_by(fold, year, X, Y) %>%
+        reframe(est = mean(est)) %>%
+        group_by(fold, year) %>%
+        reframe(
+          # Y = weighted.mean(Y, est),
+          # X = weighted.mean(X, est),
+          # depth = weighted.mean(depth, est),
+          est = (sum(est)*(grid_side_size/1.852)^2)/1e6
+        ) %>%
+        mutate(lwr = NA, upr = NA, cv = NA, se = NA) %>%
+        mutate(commonname = unique(k$data$commonname),
+               model = k_name, 
+               .before = 1)
+    }, cl = n_cores)
+    
+    names(index) <- names(models)
+    
+    write_rds(
+      index,
+      file =
+        paste0(
+          "data/model_output/model_selection/Spatiotemporal-selection-indices-", 
+               gsub("\\(.*\\)", "", model_family_name),
+               ".rds"), 
+      compress = "xz"
+    )
+    
+    ss_indices <- index
+    
+  } else {
+    
+    proj_dt <- read_rds("data/model_output/prediction-grid-data.rds") %>% 
+      distinct(X, Y, depth, year)
+    
+    ss_indices <- read_rds(
+      paste0(
+        "data/model_output/model_selection/Spatiotemporal-selection-indices-", 
+             gsub("\\(.*\\)", "", model_family_name),
+             ".rds"), 
+    ) 
+  }
+}
+```
+
+```{r}
+#| code-fold: true
+#| label: fig-spat-sel-index
+#| fig-height: !expr ceiling(length(ss_indices)/3)*2.5
+#| fig-cap: !expr paste0("Survey indices estimated using different spatiotemporal random field structures ", sp_name, " using spatiotemporal generalized linear mixed effects models with the sdmTMB package (colored solid line). Black lines with shading indicate the full biomass models with multiple components; 0 + geartype + s(month) + s(depth) + s(temperature). ", value_text_name, " is used as the response variable, and the models use meshes with ", paste(sapply(spatiotemporal_selection_mesh, function(k) k$mesh$n), collapse = " and "), " vertices (knots), as well as ", model_family_name," model family. Predictions are made to a grid with ", proj_dt %>% distinct(X,Y) %>% nrow(), " cells with a side of ", attributes(proj_dt)$grid_side_size, " km. Each line represents one fold from the 10-fold cross-validation. See Table 4 for more detailed model specification.")
+
+if(run_index) {
+  tmp <- lapply(ss_indices, function(k) {
+    if(inherits(k, "try-error")) return(NULL)
+    if(any(!is.na(k$upr))) {
+      if(max(k$upr, na.rm = TRUE) > 2*max(k$est, na.rm = TRUE)) {
+        k[k$upr > 1.5*max(k$est, na.rm = TRUE),]$upr <- 
+          ceiling(1.5*max(k$est, na.rm = TRUE))
+      }}
+    k
+  }) %>%
+    bind_rows() %>% 
+    filter(!is.na(year)) %>% 
+    mutate(model = gsub("_snabeluer|_vanlig uer", "", model)) %>% 
+    # mutate(model = factor(model, levels = names(ss_indices))) %>% 
+    mutate(
+      species = case_when(
+        commonname == "snabeluer" ~ "Beaked redfish", 
+        commonname == "vanlig uer" ~ "Golden redfish"
+      ),
+      .after = "commonname")
+  
+  load("data/model_output/index-bm.rda")
+  
+  index <- index %>% 
+    bind_rows() %>% 
+    rename("species" = "length_group")
+  
+  cowplot::plot_grid(
+    plotlist = 
+      lapply(unique(tmp$species), function(k) {
+        ggplot() +
+          geom_ribbon(
+            data = index %>% filter(species == k),
+            aes(year, est, ymin = lwr, ymax = upr), alpha = 0.3, color = NA, 
+            fill = "grey") +
+          geom_path(
+            data = index %>% filter(species == k),
+            aes(year, est), alpha = 0.5) +
+          geom_path(
+            data = tmp %>% filter(species == k),
+            aes(year, est, color = model, group = fold), alpha = 0.5) +
+          facet_wrap(~model, scales = "free") + 
+          coord_cartesian(expand = FALSE, ylim = c(0, NA)) +
+          scale_x_continuous(
+            breaks = seq(1980, 2030, 4),
+            labels = substr(seq(1980, 2030, 4),3,4)
+          ) +
+          labs(
+            x = 'Year',
+            y = ifelse(model_type == "Biomass", 'Biomass (kt)',
+                       'Abundance (millions)')
+          ) +
+          theme_bw() +
+          theme(legend.position = "none")
+      }),
+    labels = unique(tmp$species), ncol = 1
+  )
+}
+```
+

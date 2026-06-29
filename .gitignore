@@ -24,7 +24,6 @@ data/*
 !data/gis/
 !data/definitions/
 !data/environment/
-data/gis/*
 !data/gis/study area.gpkg
 !data/gis/russian_eez.*
 
