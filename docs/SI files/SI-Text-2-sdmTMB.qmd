@@ -93,6 +93,10 @@ cache_path <- function(...) {
   file.path(cache_dir, ...)
 }
 
+include_russian_data <- identical(Sys.getenv("INCLUDE_RUSSIAN_DATA"), "true")
+roi <- sf::read_sf("data/gis/study area.gpkg") |> sf::st_make_valid()
+russian_eez <- sf::read_sf("data/gis/russian_eez.shp") |> sf::st_make_valid()
+
 public_station_data_path <- file.path(
   "data",
   "public",
@@ -641,9 +645,6 @@ cowplot::plot_grid(
     mesh_crs <- st_crs(fit[[i]]$crs)
     mesh_crs <- st_crs(sub("units=m", "units=km", mesh_crs$proj4string))
 
-    mesh_df_water <- mesh$mesh_sf[mesh$normal_triangles, ]
-    mesh_df_land <- mesh$mesh_sf[mesh$barrier_triangles, ]
-
     basemap(
       mesh$mesh$loc %>%
         as.data.frame() %>%
@@ -664,11 +665,6 @@ cowplot::plot_grid(
       coord_sf(
         datum = st_crs("+proj=utm +zone=33 +datum=WGS84 +units=km +no_defs"),
         expand = FALSE
-      ) +
-      geom_sf(
-        data = mesh_df_land,
-        shape = "X",
-        size = FS(6)
       ) +
       scale_y_continuous(
         "Latitude (UTM, km from the equator)",
@@ -737,10 +733,22 @@ The resulting grid was then adjusted manually using [QGIS](https://www.qgis.org)
 if (recompile_model || !file.exists(prediction_grid_path)) {
   # switch to recompile the prediction grid. If FALSE, data are loaded from a file.
 
-  tmp <- sf::st_read("data/gis/prediction_region.gpkg", quiet = TRUE)
+  ## Restrict the prediction region to the study area and, unless explicitly
+  ## authorized, exclude the Russian EEZ before building the grid.
+
+  tmp <- sf::st_read("data/gis/prediction_region.gpkg", quiet = TRUE) %>%
+    sf::st_make_valid() %>%
+    sf::st_transform(4326) %>%
+    sf::st_intersection(sf::st_union(roi))
+
+  if (!include_russian_data) {
+    eez_local <- suppressWarnings(sf::st_crop(russian_eez, sf::st_bbox(tmp)))
+    tmp <- sf::st_difference(tmp, sf::st_union(eez_local))
+  }
+
+  tmp <- tmp %>% sf::st_transform(dt_crs)
 
   proj_dt_sf <- tmp %>%
-    st_transform(dt_crs) %>%
     st_make_grid(
       cellsize = rep(grid_side_size * 1000, 2),
       square = TRUE,
@@ -2748,15 +2756,35 @@ if (calculate_indices || !file.exists(regional_index_cache_path())) {
   ## Regions
 
   regions <- st_read("data/gis/regions.gpkg", quiet = TRUE) %>%
+    sf::st_make_valid() %>%
     st_transform(dt_crs) %>%
     mutate(region = gsub(" \\(.*\\)", "", region))
+
+  region_levels <- c(
+    "North Sea",
+    "Norwegian Coast S",
+    "Norwegian Coast N",
+    "Western Slope",
+    "Svalbard Slope",
+    "Northern Barents Sea",
+    "Central Barents Sea",
+    "Eastern Barents Sea"
+  )
+
+  if (!include_russian_data) {
+    # Eastern Barents Sea is mostly inside the Russian EEZ. Once those grid
+    # cells are excluded, the remaining sliver is not a meaningful regional
+    # unit, so drop it from the public regional breakdown.
+    region_levels <- setdiff(region_levels, "Eastern Barents Sea")
+  }
 
   reg_proj_dt <- proj_dt %>%
     mutate(x = 1000 * X, y = 1000 * Y) %>%
     sf::st_as_sf(coords = c("x", "y"), crs = dt_crs, remove = FALSE) %>%
     sf::st_join(regions) %>%
     sf::st_drop_geometry() %>%
-    filter(!is.na(region))
+    filter(!is.na(region)) %>%
+    filter(region %in% region_levels)
 
   ## Index calculus (takes a long time)
   regional_indices <-
@@ -2799,22 +2827,7 @@ if (calculate_indices || !file.exists(regional_index_cache_path())) {
       cl = length(unique(reg_proj_dt$region))
     ) %>%
     bind_rows() %>%
-    # filter(!is.na(region)) %>%
-    mutate(
-      region = factor(
-        region,
-        levels = c(
-          "North Sea",
-          "Norwegian Coast S",
-          "Norwegian Coast N",
-          "Western Slope",
-          "Svalbard Slope",
-          "Northern Barents Sea",
-          "Central Barents Sea",
-          "Eastern Barents Sea"
-        )
-      )
-    )
+    mutate(region = factor(region, levels = region_levels))
 
   ## Save
   save(
@@ -2887,21 +2900,7 @@ tmp <- regional_indices %>%
   ungroup() %>%
   mutate(prop_upr = prop + 1.96 * prop_sd / sqrt(n)) %>%
   mutate(prop_upr = if_else(prop_upr > 1, 1, prop_upr)) %>%
-  mutate(
-    region = factor(
-      region,
-      levels = c(
-        "North Sea",
-        "Norwegian Coast S",
-        "Norwegian Coast N",
-        "Western Slope",
-        "Svalbard Slope",
-        "Northern Barents Sea",
-        "Central Barents Sea",
-        "Eastern Barents Sea"
-      )
-    )
-  )
+  mutate(region = factor(region, levels = region_levels))
 
 levels(tmp$region) <- gsub(" ", "\n", levels(tmp$region))
 

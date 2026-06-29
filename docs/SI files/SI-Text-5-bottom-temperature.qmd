@@ -111,8 +111,10 @@ if (Sys.info()["sysname"] == "Linux") {
 ################### ###
 # Custom functions ----
 
-source("R/legacy/make_table.R") # a function to make tables
-source("R/legacy/bubble_map.R")
+source("R/make_table.R") # a function to make tables
+source("R/bubble_map.R")
+
+FS <- function(x) x / 2.845276
 
 ################ ##
 # ggplot theme ----
@@ -145,7 +147,16 @@ This is a supplementary information file for @vihtakari2026 providing reproducib
 ```{r data, timeit = TRUE}
 # Settings
 
-recompile_model <- TRUE # switch to compile the model. If FALSE, the model is loaded from the data/model_output folder.
+cache_dir <- file.path("output", "si-text-5")
+dir.create(cache_dir, recursive = TRUE, showWarnings = FALSE)
+
+cache_path <- function(...) {
+  file.path(cache_dir, ...)
+}
+
+include_russian_data <- identical(Sys.getenv("INCLUDE_RUSSIAN_DATA"), "true")
+
+recompile_model <- TRUE # switch to compile the model. If FALSE, the model is loaded from the output/si-text-5 folder.
 
 overview_plots <- TRUE # switch to include overview plots. Increases file size
 run_fixef <- TRUE # switch to make fixed effect plots.
@@ -231,7 +242,8 @@ if (!is.na(outlier_threshold)) {
 
 ## Remove stations outside the study area
 
-roi <- sf::read_sf("data/gis/study area.gpkg")
+roi <- sf::read_sf("data/gis/study area.gpkg") %>% sf::st_make_valid()
+russian_eez <- sf::read_sf("data/gis/russian_eez.shp") %>% sf::st_make_valid()
 
 tmp <- dt %>%
   st_as_sf(
@@ -244,6 +256,19 @@ tmp <- dt %>%
   `!`
 
 dt <- dt[tmp, ]
+
+## Exclude stations inside the Russian EEZ unless explicitly authorized
+
+if (!include_russian_data) {
+  in_eez <- dt %>%
+    st_as_sf(coords = c("lon", "lat"), crs = 4326) %>%
+    st_intersects(russian_eez) %>%
+    as.integer() %>%
+    is.na() %>%
+    `!`
+
+  dt <- dt[!in_eez, ]
+}
 
 ## CRS
 
@@ -588,17 +613,13 @@ if (recompile_model) {
 
 ```{r save-fit}
 if (recompile_model) {
-  if (!dir.exists("data/model_output")) {
-    dir.create("data/model_output")
-  }
-
   save(
     fit,
-    file = "data/model_output/temperature-model-fit.rda",
+    file = cache_path("temperature-model-fit.rda"),
     compress = "xz"
   )
 } else {
-  load("data/model_output/temperature-model-fit.rda")
+  load(cache_path("temperature-model-fit.rda"))
 }
 
 # switch to make shifting between tweedie and hurdle easier
@@ -756,10 +777,22 @@ Grid cells were modeled as points but converted to squares with `r grid_side_siz
 if (recompile_model) {
   # switch to recompile the prediction grid. If FALSE, data are loaded from a file.
 
-  tmp <- sf::st_read("data/gis/prediction_region.gpkg", quiet = TRUE)
+  ## Restrict the prediction region to the study area and, unless explicitly
+  ## authorized, exclude the Russian EEZ before building the grid.
+
+  tmp <- sf::st_read("data/gis/prediction_region.gpkg", quiet = TRUE) %>%
+    sf::st_make_valid() %>%
+    sf::st_transform(4326) %>%
+    sf::st_intersection(sf::st_union(roi))
+
+  if (!include_russian_data) {
+    eez_local <- suppressWarnings(sf::st_crop(russian_eez, sf::st_bbox(tmp)))
+    tmp <- sf::st_difference(tmp, sf::st_union(eez_local))
+  }
+
+  tmp <- tmp %>% sf::st_transform(dt_crs)
 
   proj_dt_sf <- tmp %>%
-    st_transform(dt_crs) %>%
     st_make_grid(
       cellsize = rep(grid_side_size * 1000, 2),
       square = TRUE,
@@ -776,17 +809,13 @@ if (recompile_model) {
   # ru (raster user) uses the GEBCO 15 arc-second grid: https://www.gebco.net/data_and_products/gridded_bathymetry_data/
   # and seems to cause trouble with some systems.
   # rc uses a downsampled ETOPO 1 degree grid. Works on more systems but less
-  # resolution than ru. Set the switch to FALSE if ru does not work.
+  # resolution than ru.
 
-  if (TRUE) {
-    # switch to use 15-arcsecond GEBCO grid to acquire depths
+  use_highres_bathymetry <- !is.null(getOption("ggOceanMaps.userpath")) &&
+    file.exists(getOption("ggOceanMaps.userpath"))
 
-    if (is.null(getOption("ggOceanMaps.userpath"))) {
-      # set the path to GEBCO grid
-      options(
-        ggOceanMaps.userpath = "/gpfs/gpfs0/felles/Dyphavsarter/Data fellesressurser/Gebco/gebco_2023/GEBCO_2023.nc"
-      )
-    }
+  if (use_highres_bathymetry) {
+    # use GEBCO only when the user has configured it explicitly
 
     proj_dt$depth <-
       proj_dt %>%
@@ -797,7 +826,7 @@ if (recompile_model) {
         bind = FALSE
       )
   } else {
-    # Downsampled ETOPO 1 degree grid
+    # Portable default: downsampled ETOPO grid
 
     proj_dt$depth <-
       proj_dt %>%
@@ -832,11 +861,11 @@ if (recompile_model) {
 
   saveRDS(
     proj_dt,
-    file = "data/model_output/temperature-prediction-grid-data.rds",
+    file = cache_path("temperature-prediction-grid-data.rds"),
     compress = "xz"
   )
 } else {
-  proj_dt <- read_rds("data/model_output/temperature-prediction-grid-data.rds")
+  proj_dt <- read_rds(cache_path("temperature-prediction-grid-data.rds"))
 }
 ```
 
@@ -2310,9 +2339,9 @@ if (recalculate_index) {
 
   ## Save
 
-  save(index, file = "data/model_output/temperature-index.rda", compress = "xz")
+  save(index, file = cache_path("temperature-index.rda"), compress = "xz")
 } else {
-  load("data/model_output/temperature-index.rda")
+  load(cache_path("temperature-index.rda"))
 }
 ```
 
@@ -2363,8 +2392,27 @@ tmp %>%
 if (run_regional) {
   if (recalculate_regional_index) {
     regions <- sf::st_read("data/gis/regions.gpkg", quiet = TRUE) %>%
+      sf::st_make_valid() %>%
       st_transform(4326) %>%
       mutate(region = gsub(" \\(.*\\)", "", region))
+
+    region_levels <- c(
+      "North Sea",
+      "Norwegian Coast S",
+      "Norwegian Coast N",
+      "Western Slope",
+      "Svalbard Slope",
+      "Northern Barents Sea",
+      "Central Barents Sea",
+      "Eastern Barents Sea"
+    )
+
+    if (!include_russian_data) {
+      # Eastern Barents Sea is mostly inside the Russian EEZ. Once those grid
+      # cells are excluded, the remaining sliver is not a meaningful regional
+      # unit, so drop it from the public regional breakdown.
+      region_levels <- setdiff(region_levels, "Eastern Barents Sea")
+    }
 
     depths <- c(0, 100, 300, 400, 500, 700, 1000, 1500)
 
@@ -2407,21 +2455,8 @@ if (run_regional) {
       }) %>%
       bind_rows() %>%
       filter(!is.na(region)) %>%
-      mutate(
-        region = factor(
-          region,
-          levels = c(
-            "North Sea",
-            "Norwegian Coast S",
-            "Norwegian Coast N",
-            "Western Slope",
-            "Svalbard Slope",
-            "Northern Barents Sea",
-            "Central Barents Sea",
-            "Eastern Barents Sea"
-          )
-        )
-      )
+      mutate(region = factor(region, levels = region_levels)) %>%
+      filter(!is.na(region))
 
     levels(regional_depth_indices$region) <- sub(
       " ",
@@ -2460,21 +2495,8 @@ if (run_regional) {
         st_join(regions) %>%
         filter(!duplicated(id)) %>%
         filter(!is.na(region)) %>%
-        mutate(
-          region = factor(
-            region,
-            levels = c(
-              "North Sea",
-              "Norwegian Coast S",
-              "Norwegian Coast N",
-              "Western Slope",
-              "Svalbard Slope",
-              "Northern Barents Sea",
-              "Central Barents Sea",
-              "Eastern Barents Sea"
-            )
-          )
-        ) %>%
+        mutate(region = factor(region, levels = region_levels)) %>%
+        filter(!is.na(region)) %>%
         group_by(year, region, name) %>%
         summarise(
           Y = weighted.mean(Y, est),
@@ -2518,11 +2540,11 @@ if (run_regional) {
     save(
       regional_indices,
       regional_depth_indices,
-      file = "data/model_output/temperature-regional-indices.rda",
+      file = cache_path("temperature-regional-indices.rda"),
       compress = "xz"
     )
   } else {
-    load("data/model_output/temperature-regional-indices.rda")
+    load(cache_path("temperature-regional-indices.rda"))
   }
 }
 ```
