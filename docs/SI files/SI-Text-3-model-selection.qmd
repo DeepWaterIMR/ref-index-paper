@@ -30,35 +30,54 @@ editor_options:
 ```{r setup, eval = TRUE, include = FALSE}
 # Clear the workspace for manual code runs
 
-# rm(list = ls()) 
+# rm(list = ls())
 
-knitr::opts_knit$set(root.dir = '../../') 
+knitr::opts_knit$set(root.dir = '../../')
 
-knitr::knit_hooks$set(timeit = local({
-  now = NULL
-  function(before, options) {
-    if (before) {
-      now <<- Sys.time()
-    } else {
-      res = round(difftime(Sys.time(), now, units = "mins"), 1)
-      now <<- NULL
-      # use options$label if you want the chunk label as well
-      print(paste('Time:', as.character(res), "min"))
+knitr::knit_hooks$set(
+  timeit = local({
+    now <- NULL
+    function(before, options) {
+      if (before) {
+        now <<- Sys.time()
+      } else {
+        res <- round(difftime(Sys.time(), now, units = "mins"), 1)
+        now <<- NULL
+        # use options$label if you want the chunk label as well
+        print(paste('Time:', as.character(res), "min"))
+      }
     }
-  }})
+  })
 )
 
 # Settings
-recompile_models <- FALSE # switch to compile the model. If FALSE, the model is loaded from the data/model_output folder.
+
+cache_dir <- file.path("output", "si-text-3")
+model_selection_dir <- file.path(cache_dir, "model_selection")
+
+temperature_model_path <- Sys.getenv(
+  "SI_TEMPERATURE_MODEL_PATH",
+  file.path("output", "si-text-5", "temperature-model-fit.rda")
+)
+prediction_grid_path <- Sys.getenv(
+  "SI_PREDICTION_GRID_PATH",
+  file.path("output", "si-text-2", "prediction-grid-data.rds")
+)
+overall_index_path <- Sys.getenv(
+  "SI_INDEX_PATH",
+  file.path("output", "si-text-2", "index-bm.rda")
+)
+
+recompile_models <- TRUE # switch to compile the model. If FALSE, the model is loaded from the output/si-text-3 folder.
 recalculate_index <- recompile_models # switch to estimate index values from the predictive skill fold (10%)
-recompile_data <- FALSE # switch to recompile data from sources. FALSE saves a couple of minutes when include_temperature = TRUE
+recompile_data <- TRUE # switch to recompile data from sources. FALSE saves a couple of minutes when include_temperature = TRUE
 
-component_ranking <- FALSE # run component ranking?
-model_selection <- FALSE
-family_selection <- FALSE
-spatiotemporal_selection <- FALSE
+component_ranking <- TRUE # run component ranking?
+model_selection <- TRUE
+family_selection <- TRUE
+spatiotemporal_selection <- TRUE
 
-development_mode <- FALSE # Only uses a subset of data and coarse meshes to able quick compilation of the models. Turn this option off once the document is finished and rerun. 
+development_mode <- FALSE # Only uses a subset of data and coarse meshes to able quick compilation of the models. Turn this option off once the document is finished and rerun.
 ```
 
 This supplementary information file for @vihtakari2026 provides a reproducible overview of the model selection process using generalized linear mixed-effects models fitted with the [sdmTMB package](https://CRAN.R-project.org/package=sdmTMB) [@sdmTMB] in R [@rcoreteam]. The four-step model selection procedure employs 10-fold cross-validation via the sdmTMB_cv() function. Models are compared based on total predicted (out-of-sample) negative log-likelihood (NLL) and Akaike information criterion (AIC) values. To further assess the impact of model alternatives on survey indices, visual comparisons are made with the best-fitting model. This document was written with [Quarto](https://quarto.org/) and can be compiled from the project's [GitHub repository](https://github.com/DeepWaterIMR/ref-index-paper). Foldable code fields are included to display the code used for model compilation.
@@ -74,6 +93,8 @@ Overall, the best fitting model had a formula of rho_biomass ~ 0 + geartype + s(
 
 ```{r packages}
 #| timeit: !expr if(recompile_data) TRUE else NULL
+
+dir.create(model_selection_dir, recursive = TRUE, showWarnings = FALSE)
 
 ############## ####
 #### Libraries ----
@@ -118,8 +139,8 @@ if(Sys.info()["sysname"] == "Linux") {
 ################### ###
 # Custom functions ----
 
-source("R/legacy/make_table.R") # a function to make tables
-source("R/legacy/bubble_map.R")
+source("R/make_table.R") # a function to make tables
+source("R/bubble_map.R")
 
 ################ ##
 # ggplot theme ----
@@ -186,9 +207,20 @@ mesh_cutoff <- ifelse(development_mode, 150, 75) # Minimum distance between knot
 # Read the data ----
 
 if(recompile_data) {
-  
-  load("data/out/Compiled_redfish_survey_data.rda")
-  
+
+  public_station_data_path <- file.path("data", "public", "redfish_station_data.rds")
+
+  if (!file.exists(public_station_data_path)) {
+    stop(
+      "Public station data were not found at ",
+      public_station_data_path,
+      ". Run prepare_public_data() first.",
+      call. = FALSE
+    )
+  }
+
+  stn <- readRDS(public_station_data_path)
+
   dt <- lapply(c("snabeluer", "vanlig uer"), function(filter_sp) {
     out <- stn %>%
       distinct() %>% 
@@ -267,13 +299,19 @@ if(recompile_data) {
   
   # Add temperature predictor variable (takes time)
   if(include_temperature) {
-    load("data/model_output/temperature-model-fit.rda")
-    
+    load(temperature_model_path)
+
+    ## The temperature model cannot extrapolate to survey years it was not
+    ## fitted on (e.g. the most recent survey year if the temperature model
+    ## has not yet been refitted on matching data).
+    max_temp_year <- max(fit[[1]]$mod$data$year)
+    dt <- dt %>% filter(year <= max_temp_year)
+
     ## Predict using the data
-    
+
     dt <- predict(
       fit[[1]]$mod,
-      newdata = dt, 
+      newdata = dt,
       type = "response",
       model = NA,
       return_tmb_object = FALSE) %>% 
@@ -344,11 +382,11 @@ if(recompile_data) {
   
   save(dt, dt_crs, model_type, value_name, value_text_name, value_text_unit,
        sp_name, Sp_name,
-       file = "data/model_output/model_selection/model-selection-input-data.rda",
+       file = "output/si-text-3/model_selection/model-selection-input-data.rda",
        compress = "xz")
   
 } else {
-  load("data/model_output/model_selection/model-selection-input-data.rda")
+  load("output/si-text-3/model_selection/model-selection-input-data.rda")
 }
 ```
 
@@ -413,12 +451,12 @@ if(recompile_models & component_ranking) {
     replicate_df("commonname", levels(dt$commonname)) %>% 
     relocate("commonname", .before = 1)
   
-  if(!dir.exists("data/model_output/model_selection")) {
-    dir.create("data/model_output/model_selection")
+  if(!dir.exists("output/si-text-3/model_selection")) {
+    dir.create("output/si-text-3/model_selection")
   }
   
   saveRDS(component_ranking_list, 
-          file = "data/model_output/model_selection/component_ranking_list.rds")
+          file = "output/si-text-3/model_selection/component_ranking_list.rds")
   
   future::plan("multisession", workers = n_sessions)
   options(future.globals.maxSize = 1000 * 1024^2, future.seed = TRUE)
@@ -474,7 +512,7 @@ if(recompile_models & component_ranking) {
       saveRDS(
         list(mod = out, mesh = comp_ranking_mesh),
         file =
-          paste0("data/model_output/model_selection/Component-ranking-models-",
+          paste0("output/si-text-3/model_selection/Component-ranking-models-",
                  gsub("\\(.*\\)", "", model_family_name), "_",
                  paste(component_ranking_list$commonname, 
                        gsub(" ", "-", component_ranking_list$name), sep = "_")[i],
@@ -493,7 +531,7 @@ if(recompile_models & component_ranking) {
       pbapply::pblapply(1:nrow(component_ranking_list), function(i) {
         readRDS(
           file =
-            paste0("data/model_output/model_selection/Component-ranking-models-",
+            paste0("output/si-text-3/model_selection/Component-ranking-models-",
                    gsub("\\(.*\\)", "", model_family_name), "_",
                    paste(component_ranking_list$commonname, 
                          gsub(" ", "-", component_ranking_list$name), sep = "_")[i],
@@ -510,7 +548,7 @@ if(recompile_models & component_ranking) {
       pbapply::pblapply(
         unique(dt$commonname), function(k) {
           readRDS(
-            dir("data/model_output/model_selection/", 
+            dir("output/si-text-3/model_selection/", 
                 pattern = paste0("Component-ranking-models-",
                                  gsub("\\(.*\\)", "", model_family_name), "_", k),
                 full.names = TRUE)[1])$mesh
@@ -531,7 +569,7 @@ if(recompile_models & component_ranking) {
     if(save_model_output) {
       saveRDS(component_ranking_models, 
               file = paste0(
-                "data/model_output/model_selection/Component-ranking-models-",
+                "output/si-text-3/model_selection/Component-ranking-models-",
                 gsub("\\(.*\\)", "", model_family_name), ".rds"),
               compress = "xz"
       ) 
@@ -539,7 +577,7 @@ if(recompile_models & component_ranking) {
     
     saveRDS(component_ranking_mesh,
             file = paste0(
-              "data/model_output/model_selection/Component-ranking-meshes-",
+              "output/si-text-3/model_selection/Component-ranking-meshes-",
               gsub("\\(.*\\)", "", model_family_name), ".rds"),
             compress = "xz"
     )  
@@ -555,24 +593,24 @@ if(recompile_models & component_ranking) {
     component_ranking_params,
     file = 
       paste0(
-        "data/model_output/model_selection/Component-ranking-parameters-",
+        "output/si-text-3/model_selection/Component-ranking-parameters-",
         gsub("\\(.*\\)", "", model_family_name), ".rds")
   )
   
 } else {
   component_ranking_list <- 
     readRDS(
-      file = "data/model_output/model_selection/component_ranking_list.rds")
+      file = "output/si-text-3/model_selection/component_ranking_list.rds")
   
   component_ranking_mesh <- 
     readRDS(paste0(
-      "data/model_output/model_selection/Component-ranking-meshes-",
+      "output/si-text-3/model_selection/Component-ranking-meshes-",
       gsub("\\(.*\\)", "", model_family_name), ".rds")
     )
   
   component_ranking_params <-
     readRDS(paste0(
-      "data/model_output/model_selection/Component-ranking-parameters-",
+      "output/si-text-3/model_selection/Component-ranking-parameters-",
       gsub("\\(.*\\)", "", model_family_name), ".rds")
     )
 }
@@ -639,13 +677,13 @@ if(recompile_models & component_ranking) {
   write_csv(
     component_ranking_tab,
     file =
-      paste0("data/model_output/model_selection/Component-ranking-table-", 
+      paste0("output/si-text-3/model_selection/Component-ranking-table-", 
              gsub("\\(.*\\)", "", model_family_name),
              ".csv")
   )
 } else {
   component_ranking_tab <- read_csv(
-    paste0("data/model_output/model_selection/Component-ranking-table-", 
+    paste0("output/si-text-3/model_selection/Component-ranking-table-", 
            gsub("\\(.*\\)", "", model_family_name),
            ".csv")
   )
@@ -795,7 +833,7 @@ if(run_fixef) {
       fixef_dt,
       file =
         paste0(
-          "data/model_output/model_selection/Component-ranking-fixed-effects-", 
+          "output/si-text-3/model_selection/Component-ranking-fixed-effects-", 
           gsub("\\(.*\\)", "", model_family_name),
           ".rds"),
       compress = "xz"
@@ -808,7 +846,7 @@ if(run_fixef) {
     fixef_dt <- readRDS(
       file =
         paste0(
-          "data/model_output/model_selection/Component-ranking-fixed-effects-", 
+          "output/si-text-3/model_selection/Component-ranking-fixed-effects-", 
           gsub("\\(.*\\)", "", model_family_name),
           ".rds")
     )
@@ -894,7 +932,7 @@ if(run_fixef) {
 if(run_index) {
   if(recalculate_index & component_ranking) {
     
-    proj_dt <- read_rds("data/model_output/prediction-grid-data.rds") %>% 
+    proj_dt <- read_rds(prediction_grid_path) %>% 
       distinct(X, Y, depth, year) 
     
     ## Prediction grid cell side length
@@ -953,13 +991,18 @@ if(run_index) {
         if(include_temperature & temperature) {
           
           ### Temperature model ###
-          load("data/model_output/temperature-model-fit.rda")
-          
+          load(temperature_model_path)
+
+          ## The temperature model cannot extrapolate to grid years it was
+          ## not fitted on (see the note in the data chunk above).
+          max_temp_year <- max(fit[[1]]$mod$data$year)
+          pred_dt <- pred_dt %>% filter(year <= max_temp_year)
+
           ## Predict using the data
-          
+
           pred_dt <- predict(
             fit[[1]]$mod,
-            newdata = pred_dt %>% 
+            newdata = pred_dt %>%
               mutate(fyear = as.factor(year),
                      month = as.integer(8)),
             type = "response",
@@ -1021,7 +1064,7 @@ if(run_index) {
     write_rds(
       index,
       file =
-        paste0("data/model_output/model_selection/Component-ranking-indices-", 
+        paste0("output/si-text-3/model_selection/Component-ranking-indices-", 
                gsub("\\(.*\\)", "", model_family_name),
                ".rds"), 
       compress = "xz"
@@ -1031,11 +1074,11 @@ if(run_index) {
     
   } else {
     
-    proj_dt <- read_rds("data/model_output/prediction-grid-data.rds") %>% 
+    proj_dt <- read_rds(prediction_grid_path) %>% 
       distinct(X, Y, depth, year)
     
     sc_indices <- read_rds(
-      paste0("data/model_output/model_selection/Component-ranking-indices-", 
+      paste0("output/si-text-3/model_selection/Component-ranking-indices-", 
              gsub("\\(.*\\)", "", model_family_name),
              ".rds"), 
     ) 
@@ -1069,7 +1112,7 @@ if(run_index) {
       ),
       .after = "commonname")
   
-  load("data/model_output/index-bm.rda")
+  load(overall_index_path)
   
   index <- index %>% 
     bind_rows() %>% 
@@ -1172,12 +1215,12 @@ if(recompile_models & model_selection) {
     replicate_df("commonname", levels(dt$commonname)) %>% 
     relocate("commonname", .before = 1)
   
-  if(!dir.exists("data/model_output/model_selection")) {
-    dir.create("data/model_output/model_selection")
+  if(!dir.exists("output/si-text-3/model_selection")) {
+    dir.create("output/si-text-3/model_selection")
   }
   
   saveRDS(model_list, 
-          file = "data/model_output/model_selection/model_selection_list.rds")
+          file = "output/si-text-3/model_selection/model_selection_list.rds")
   
   future::plan("multisession", workers = n_sessions)
   options(future.globals.maxSize = 1000 * 1024^2, future.seed = TRUE)
@@ -1244,7 +1287,7 @@ if(recompile_models & model_selection) {
       saveRDS(
         list(mod = out, mesh = model_selection_mesh),
         file =
-          paste0("data/model_output/model_selection/Model-selection-models-",
+          paste0("output/si-text-3/model_selection/Model-selection-models-",
                  gsub("\\(.*\\)", "", model_family_name), "_",
                  paste(model_list$commonname, gsub(" ", "-", model_list$name), sep = "_")[i],
                  ".rds"),
@@ -1262,7 +1305,7 @@ if(recompile_models & model_selection) {
       pbapply::pblapply(1:nrow(model_list), function(i) {
         readRDS(
           file =
-            paste0("data/model_output/model_selection/Model-selection-models-",
+            paste0("output/si-text-3/model_selection/Model-selection-models-",
                    gsub("\\(.*\\)", "", model_family_name), "_",
                    paste(model_list$commonname, 
                          gsub(" ", "-", model_list$name), sep = "_")[i],
@@ -1279,7 +1322,7 @@ if(recompile_models & model_selection) {
       pbapply::pblapply(
         unique(dt$commonname), function(k) {
           readRDS(
-            dir("data/model_output/model_selection/", 
+            dir("output/si-text-3/model_selection/", 
                 pattern = paste0("Model-selection-models-",
                                  gsub("\\(.*\\)", "", model_family_name), "_", k),
                 full.names = TRUE)[1])$mesh
@@ -1302,7 +1345,7 @@ if(recompile_models & model_selection) {
     if(save_model_output) {
       saveRDS(model_selection_models, 
               file = paste0(
-                "data/model_output/model_selection/Model-selection-models-",
+                "output/si-text-3/model_selection/Model-selection-models-",
                 gsub("\\(.*\\)", "", model_family_name), ".rds"),
               compress = "xz"
       ) %>% system.time()
@@ -1310,7 +1353,7 @@ if(recompile_models & model_selection) {
     
     saveRDS(model_selection_mesh,
             file = paste0(
-              "data/model_output/model_selection/Model-selection-meshes-",
+              "output/si-text-3/model_selection/Model-selection-meshes-",
               gsub("\\(.*\\)", "", model_family_name), ".rds"),
             compress = "xz"
     )  
@@ -1326,24 +1369,24 @@ if(recompile_models & model_selection) {
     model_selection_params,
     file = 
       paste0(
-        "data/model_output/model_selection/Model-selection-parameters-",
+        "output/si-text-3/model_selection/Model-selection-parameters-",
         gsub("\\(.*\\)", "", model_family_name), ".rds")
   )
   
 } else {
   model_list <- 
     readRDS(
-      file = "data/model_output/model_selection/model_selection_list.rds")
+      file = "output/si-text-3/model_selection/model_selection_list.rds")
   
   model_selection_mesh <- 
     readRDS(paste0(
-      "data/model_output/model_selection/Model-selection-meshes-",
+      "output/si-text-3/model_selection/Model-selection-meshes-",
       gsub("\\(.*\\)", "", model_family_name), ".rds")
     )
   
   model_selection_params <-
     readRDS(paste0(
-      "data/model_output/model_selection/Model-selection-parameters-",
+      "output/si-text-3/model_selection/Model-selection-parameters-",
       gsub("\\(.*\\)", "", model_family_name), ".rds")
     )
 }
@@ -1412,13 +1455,13 @@ if(recompile_models & model_selection) {
   write_csv(
     modsel_tab,
     file =
-      paste0("data/model_output/model_selection/Model-selection-table-", 
+      paste0("output/si-text-3/model_selection/Model-selection-table-", 
              gsub("\\(.*\\)", "", model_family_name),
              ".csv")
   )
 } else {
   modsel_tab <- read_csv(
-    paste0("data/model_output/model_selection/Model-selection-table-", 
+    paste0("output/si-text-3/model_selection/Model-selection-table-", 
            gsub("\\(.*\\)", "", model_family_name),
            ".csv")
   )
@@ -1500,7 +1543,7 @@ ggplot(tmp, aes(y = model, x = value, color = status, shape = status)) +
 if(run_index) {
   if(recalculate_index & model_selection) {
     
-    proj_dt <- read_rds("data/model_output/prediction-grid-data.rds") %>% 
+    proj_dt <- read_rds(prediction_grid_path) %>% 
       distinct(X, Y, depth, year) 
     
     ## Prediction grid cell side length
@@ -1560,13 +1603,18 @@ if(run_index) {
         if(include_temperature & temperature) {
           
           ### Temperature model ###
-          load("data/model_output/temperature-model-fit.rda")
-          
+          load(temperature_model_path)
+
+          ## The temperature model cannot extrapolate to grid years it was
+          ## not fitted on (see the note in the data chunk above).
+          max_temp_year <- max(fit[[1]]$mod$data$year)
+          pred_dt <- pred_dt %>% filter(year <= max_temp_year)
+
           ## Predict using the data
-          
+
           pred_dt <- predict(
             fit[[1]]$mod,
-            newdata = pred_dt %>% 
+            newdata = pred_dt %>%
               mutate(fyear = as.factor(year),
                      month = as.integer(8)),
             type = "response",
@@ -1628,7 +1676,7 @@ if(run_index) {
     write_rds(
       index,
       file =
-        paste0("data/model_output/model_selection/Model-selection-indices-", 
+        paste0("output/si-text-3/model_selection/Model-selection-indices-", 
                gsub("\\(.*\\)", "", model_family_name),
                ".rds"), 
       compress = "xz"
@@ -1638,11 +1686,11 @@ if(run_index) {
     
   } else {
     
-    proj_dt <- read_rds("data/model_output/prediction-grid-data.rds") %>% 
+    proj_dt <- read_rds(prediction_grid_path) %>% 
       distinct(X, Y, depth, year)
     
     ms_indices <- read_rds(
-      paste0("data/model_output/model_selection/Model-selection-indices-", 
+      paste0("output/si-text-3/model_selection/Model-selection-indices-", 
              gsub("\\(.*\\)", "", model_family_name),
              ".rds"), 
     ) 
@@ -1677,7 +1725,7 @@ if(run_index) {
       ),
       .after = "commonname")
   
-  load("data/model_output/index-bm.rda")
+  load(overall_index_path)
   
   index <- index %>% 
     bind_rows() %>% 
@@ -1737,7 +1785,7 @@ if(recompile_models & family_selection) {
   
   saveRDS(model_family_list,
           file = paste0(
-            "data/model_output/model_selection/Model-family-comparison-list-",
+            "output/si-text-3/model_selection/Model-family-comparison-list-",
              switch(response_variable, 
                     "catch biomass" = "cw", 
                     "biomass density" = "bm", 
@@ -1787,7 +1835,7 @@ if(recompile_models & family_selection) {
               out,
               file =
                 paste0(
-                  "data/model_output/model_selection/Family-selection-models-",
+                  "output/si-text-3/model_selection/Family-selection-models-",
                   paste(k, 
                         gsub(" ", "-", names(model_family_list[j])),
                         sep = "_"),
@@ -1808,7 +1856,7 @@ if(recompile_models & family_selection) {
             readRDS(
               file =
                 paste0(
-                  "data/model_output/model_selection/Family-selection-models-",
+                  "output/si-text-3/model_selection/Family-selection-models-",
                   paste(k, 
                         gsub(" ", "-", names(model_family_list[j])),
                         sep = "_"),
@@ -1847,7 +1895,7 @@ if(recompile_models & family_selection) {
     saveRDS(
       model_family_models, 
       file = 
-        paste0("data/model_output/model_selection/Family-selection-models-",
+        paste0("output/si-text-3/model_selection/Family-selection-models-",
              switch(response_variable, 
                     "catch biomass" = "cw", 
                     "biomass density" = "bm", 
@@ -1867,7 +1915,7 @@ if(recompile_models & family_selection) {
   saveRDS(
     family_selection_params,
     file = 
-      paste0("data/model_output/model_selection/Family-selection-parameters-",
+      paste0("output/si-text-3/model_selection/Family-selection-parameters-",
              switch(response_variable, 
                     "catch biomass" = "cw", 
                     "biomass density" = "bm", 
@@ -1880,7 +1928,7 @@ if(recompile_models & family_selection) {
   family_selection_params <- 
     readRDS(
       paste0(
-        "data/model_output/model_selection/Family-selection-parameters-",
+        "output/si-text-3/model_selection/Family-selection-parameters-",
              switch(response_variable, 
                     "catch biomass" = "cw", 
                     "biomass density" = "bm", 
@@ -1892,7 +1940,7 @@ if(recompile_models & family_selection) {
   model_family_list <-
     readRDS(
       paste0(
-        "data/model_output/model_selection/Model-family-comparison-list-",
+        "output/si-text-3/model_selection/Model-family-comparison-list-",
              switch(response_variable, 
                     "catch biomass" = "cw", 
                     "biomass density" = "bm", 
@@ -1936,7 +1984,7 @@ if(recompile_models & family_selection) {
   write_delim(
     modtab,
     file = 
-      paste0("data/model_output/model_selection/Family-selection-table-",
+      paste0("output/si-text-3/model_selection/Family-selection-table-",
              switch(response_variable, 
                     "catch biomass" = "cw", 
                     "biomass density" = "bm", 
@@ -1946,7 +1994,7 @@ if(recompile_models & family_selection) {
   )
 } else {
   modtab <- read_delim(
-    paste0("data/model_output/model_selection/Family-selection-table-",
+    paste0("output/si-text-3/model_selection/Family-selection-table-",
            switch(response_variable, 
                   "catch biomass" = "cw", 
                   "biomass density" = "bm", 
@@ -2027,7 +2075,7 @@ if(recompile_models & family_selection) {
   saveRDS(
     qq_dat, 
     file = paste0(
-      "data/model_output/model_selection/Family-selection-residuals-",
+      "output/si-text-3/model_selection/Family-selection-residuals-",
       switch(response_variable, 
              "catch biomass" = "cw", 
              "biomass density" = "bm", 
@@ -2039,7 +2087,7 @@ if(recompile_models & family_selection) {
 } else {
   qq_dat <- readRDS(
     paste0(
-      "data/model_output/model_selection/Family-selection-residuals-",
+      "output/si-text-3/model_selection/Family-selection-residuals-",
       switch(response_variable, 
              "catch biomass" = "cw", 
              "biomass density" = "bm", 
@@ -2075,11 +2123,19 @@ cowplot::plot_grid(
 if(run_index) {
   if(recalculate_index & family_selection) {
     
-    proj_dt <- read_rds("data/model_output/prediction-grid-data.rds") %>% 
+    proj_dt <- read_rds(prediction_grid_path) %>%
       distinct(X, Y, depth, year)
-    
+
     grid_side_size <- attributes(proj_dt)$grid_side_size # kilometers due to UTM projection and division by 1000
-    
+
+    if(development_mode) {
+      proj_dt <- proj_dt %>%
+        filter(year > 2003) %>%
+        mutate(sample = rep(1:4, length.out = nrow(.))) %>%
+        filter(sample == 1) %>%
+        dplyr::select(-sample)
+    }
+
     index <- pbapply::pblapply(seq_along(model_family_models), function(i) {
       print(i)
       pbapply::pblapply(seq_along(model_family_models[[i]]$models), function(j) {
@@ -2120,13 +2176,18 @@ if(run_index) {
         if(include_temperature & temperature) {
           
           ### Temperature model ###
-          load("data/model_output/temperature-model-fit.rda")
-          
+          load(temperature_model_path)
+
+          ## The temperature model cannot extrapolate to grid years it was
+          ## not fitted on (see the note in the data chunk above).
+          max_temp_year <- max(fit[[1]]$mod$data$year)
+          pred_dt <- pred_dt %>% filter(year <= max_temp_year)
+
           ## Predict using the data
-          
+
           pred_dt <- predict(
             fit[[1]]$mod,
-            newdata = pred_dt %>% 
+            newdata = pred_dt %>%
               mutate(fyear = as.factor(year),
                      month = as.integer(8)),
             type = "response",
@@ -2193,7 +2254,7 @@ if(run_index) {
       index,
       file =
         paste0(
-          "data/model_output/model_selection/Family-selection-indices-",
+          "output/si-text-3/model_selection/Family-selection-indices-",
           switch(response_variable, 
                  "catch biomass" = "cw", 
                  "biomass density" = "bm", 
@@ -2204,12 +2265,12 @@ if(run_index) {
     
     fs_indices <- index
   } else {
-    proj_dt <- read_rds("data/model_output/prediction-grid-data.rds") %>% 
+    proj_dt <- read_rds(prediction_grid_path) %>% 
       distinct(X, Y, depth, year)
     
     fs_indices <- read_rds(
       paste0(
-        "data/model_output/model_selection/Family-selection-indices-",
+        "output/si-text-3/model_selection/Family-selection-indices-",
         switch(response_variable, 
                "catch biomass" = "cw", 
                "biomass density" = "bm", 
@@ -2228,6 +2289,7 @@ if(run_index) {
 
 if(run_index) {
   tmp <- lapply(fs_indices, function(k) {
+    if(inherits(k, "try-error")) return(NULL)
     if(any(!is.na(k$upr))) {
       if(max(k$upr, na.rm = TRUE) > 2*max(k$est, na.rm = TRUE)) {
         k[k$upr > 1.5*max(k$est, na.rm = TRUE),]$upr <- 
@@ -2290,12 +2352,12 @@ if(recompile_models & spatiotemporal_selection) {
     replicate_df("commonname", levels(dt$commonname)) %>% 
     relocate("commonname", .before = 1)
   
-  if(!dir.exists("data/model_output/model_selection")) {
-    dir.create("data/model_output/model_selection")
+  if(!dir.exists("output/si-text-3/model_selection")) {
+    dir.create("output/si-text-3/model_selection")
   }
   
   saveRDS(spatiotemporal_list, 
-          file = "data/model_output/model_selection/spatiotemporal_list.rds")
+          file = "output/si-text-3/model_selection/spatiotemporal_list.rds")
   
   future::plan("multisession", workers = n_sessions)
   options(future.globals.maxSize = 1000 * 1024^2, future.seed = TRUE)
@@ -2340,7 +2402,7 @@ if(recompile_models & spatiotemporal_selection) {
         list(mod = out, mesh = spatiotemporal_mesh),
         file =
           paste0(
-          "data/model_output/model_selection/Spatiotemporal-selection-models-",
+          "output/si-text-3/model_selection/Spatiotemporal-selection-models-",
                  gsub("\\(.*\\)", "", model_family_name), "_",
                  paste(spatiotemporal_list$commonname, gsub(" ", "-", spatiotemporal_list$name), sep = "_")[i],
                  ".rds"),
@@ -2359,7 +2421,7 @@ if(recompile_models & spatiotemporal_selection) {
         readRDS(
           file =
             paste0(
-            "data/model_output/model_selection/Spatiotemporal-selection-models-",
+            "output/si-text-3/model_selection/Spatiotemporal-selection-models-",
                    gsub("\\(.*\\)", "", model_family_name), "_",
                    paste(spatiotemporal_list$commonname, 
                          gsub(" ", "-", spatiotemporal_list$name), sep = "_")[i],
@@ -2376,7 +2438,7 @@ if(recompile_models & spatiotemporal_selection) {
       pbapply::pblapply(
         unique(dt$commonname), function(k) {
           readRDS(
-            dir("data/model_output/model_selection/", 
+            dir("output/si-text-3/model_selection/", 
                 pattern = paste0("Spatiotemporal-selection-models-",
                                  gsub("\\(.*\\)", "", model_family_name), "_", k),
                 full.names = TRUE)[1])$mesh
@@ -2397,7 +2459,7 @@ if(recompile_models & spatiotemporal_selection) {
     if(save_model_output) {
       saveRDS(spatiotemporal_selection_models, 
               file = paste0(
-                "data/model_output/model_selection/Spatiotemporal-selection-models-",
+                "output/si-text-3/model_selection/Spatiotemporal-selection-models-",
                 gsub("\\(.*\\)", "", model_family_name), ".rds"),
               compress = "xz"
       ) %>% system.time()
@@ -2405,7 +2467,7 @@ if(recompile_models & spatiotemporal_selection) {
     
     saveRDS(spatiotemporal_selection_mesh,
             file = paste0(
-              "data/model_output/model_selection/Spatiotemporal-selection-meshes-",
+              "output/si-text-3/model_selection/Spatiotemporal-selection-meshes-",
               gsub("\\(.*\\)", "", model_family_name), ".rds"),
             compress = "xz"
     )  
@@ -2421,24 +2483,24 @@ if(recompile_models & spatiotemporal_selection) {
     spatiotemporal_selection_params,
     file = 
       paste0(
-        "data/model_output/model_selection/Spatiotemporal-selection-parameters-",
+        "output/si-text-3/model_selection/Spatiotemporal-selection-parameters-",
         gsub("\\(.*\\)", "", model_family_name), ".rds")
   )
   
 } else {
   spatiotemporal_list <- 
     readRDS(
-      file = "data/model_output/model_selection/spatiotemporal_list.rds")
+      file = "output/si-text-3/model_selection/spatiotemporal_list.rds")
   
   spatiotemporal_selection_mesh <- 
     readRDS(paste0(
-      "data/model_output/model_selection/Spatiotemporal-selection-meshes-",
+      "output/si-text-3/model_selection/Spatiotemporal-selection-meshes-",
       gsub("\\(.*\\)", "", model_family_name), ".rds")
     )
   
   spatiotemporal_selection_params <-
     readRDS(paste0(
-      "data/model_output/model_selection/Spatiotemporal-selection-parameters-",
+      "output/si-text-3/model_selection/Spatiotemporal-selection-parameters-",
       gsub("\\(.*\\)", "", model_family_name), ".rds")
     )
 }
@@ -2508,13 +2570,13 @@ if(recompile_models & spatiotemporal_selection) {
   write_csv(
     spatiotemporal_selection_tab,
     file =
-      paste0("data/model_output/model_selection/Spatiotemporal-selection-table-", 
+      paste0("output/si-text-3/model_selection/Spatiotemporal-selection-table-", 
              gsub("\\(.*\\)", "", model_family_name),
              ".csv")
   )
 } else {
   spatiotemporal_selection_tab <- read_csv(
-    paste0("data/model_output/model_selection/Spatiotemporal-selection-table-", 
+    paste0("output/si-text-3/model_selection/Spatiotemporal-selection-table-", 
            gsub("\\(.*\\)", "", model_family_name),
            ".csv")
   )
@@ -2596,7 +2658,7 @@ ggplot(tmp, aes(x = model, y = value, color = status, shape = status)) +
 if(run_index) {
   if(recalculate_index & spatiotemporal_selection) {
     
-    proj_dt <- read_rds("data/model_output/prediction-grid-data.rds") %>% 
+    proj_dt <- read_rds(prediction_grid_path) %>% 
       distinct(X, Y, depth, year) 
     
     ## Prediction grid cell side length
@@ -2657,13 +2719,18 @@ if(run_index) {
         if(include_temperature & temperature) {
           
           ### Temperature model ###
-          load("data/model_output/temperature-model-fit.rda")
-          
+          load(temperature_model_path)
+
+          ## The temperature model cannot extrapolate to grid years it was
+          ## not fitted on (see the note in the data chunk above).
+          max_temp_year <- max(fit[[1]]$mod$data$year)
+          pred_dt <- pred_dt %>% filter(year <= max_temp_year)
+
           ## Predict using the data
-          
+
           pred_dt <- predict(
             fit[[1]]$mod,
-            newdata = pred_dt %>% 
+            newdata = pred_dt %>%
               mutate(fyear = as.factor(year),
                      month = as.integer(8)),
             type = "response",
@@ -2727,7 +2794,7 @@ if(run_index) {
       index,
       file =
         paste0(
-          "data/model_output/model_selection/Spatiotemporal-selection-indices-", 
+          "output/si-text-3/model_selection/Spatiotemporal-selection-indices-", 
                gsub("\\(.*\\)", "", model_family_name),
                ".rds"), 
       compress = "xz"
@@ -2737,12 +2804,12 @@ if(run_index) {
     
   } else {
     
-    proj_dt <- read_rds("data/model_output/prediction-grid-data.rds") %>% 
+    proj_dt <- read_rds(prediction_grid_path) %>% 
       distinct(X, Y, depth, year)
     
     ss_indices <- read_rds(
       paste0(
-        "data/model_output/model_selection/Spatiotemporal-selection-indices-", 
+        "output/si-text-3/model_selection/Spatiotemporal-selection-indices-", 
              gsub("\\(.*\\)", "", model_family_name),
              ".rds"), 
     ) 
@@ -2777,7 +2844,7 @@ if(run_index) {
       ),
       .after = "commonname")
   
-  load("data/model_output/index-bm.rda")
+  load(overall_index_path)
   
   index <- index %>% 
     bind_rows() %>% 
