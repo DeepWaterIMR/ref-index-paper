@@ -11,3 +11,7 @@ This repository is intended to become a public, minimal redfish survey-index sho
 - `data/public/` is the reproducibility surface. `review/` and `output/` are local QA products and stay ignored unless explicitly reviewed.
 - Keep the public workflow minimal: prepare sanitized data, fit the showcase model, write review artifacts, and run the audit. Do not restore legacy private notebooks or manuscript-era scripts into the public candidate tree.
 - Run `source("run_analysis.R")` and `audit_public_surface()` before suggesting publication.
+
+## Project memory
+
+Persistent project notes live in `memory/`. Read `memory/MEMORY.md` at the start of each session for an index of what is there. Write new findings back to `memory/` as markdown files and add them to the index — but keep the files public-safe: no local absolute paths, no credentials, no private share links, no restricted data details. Use repo-relative paths only.

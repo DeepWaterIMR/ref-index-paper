@@ -68,9 +68,9 @@ overall_index_path <- Sys.getenv(
   file.path("output", "si-text-2", "index-bm.rda")
 )
 
-recompile_models <- TRUE # switch to compile the model. If FALSE, the model is loaded from the output/si-text-3 folder.
+recompile_models <- FALSE # switch to compile the model. If FALSE, the model is loaded from the output/si-text-3 folder.
 recalculate_index <- recompile_models # switch to estimate index values from the predictive skill fold (10%)
-recompile_data <- TRUE # switch to recompile data from sources. FALSE saves a couple of minutes when include_temperature = TRUE
+recompile_data <- FALSE # switch to recompile data from sources. FALSE saves a couple of minutes when include_temperature = TRUE
 
 component_ranking <- TRUE # run component ranking?
 model_selection <- TRUE

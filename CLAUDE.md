@@ -15,3 +15,7 @@ Public filtering is spatial:
 Never write a local BES database path into tracked files. Use `BES_DATABASE_PATH="paste your BES database path here"` in examples.
 
 Before suggesting publication, run `source("run_analysis.R")` and `audit_public_surface()`.
+
+## Project memory
+
+Persistent project notes live in `memory/`. Read `memory/MEMORY.md` at the start of each session for an index of what is there. Write new findings back to `memory/` as markdown files and add them to the index — but keep the files public-safe: no local absolute paths, no credentials, no private share links, no restricted data details. Use repo-relative paths only.
