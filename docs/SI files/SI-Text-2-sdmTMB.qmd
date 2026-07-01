@@ -26,11 +26,9 @@ title: "SI Text 2: Spatiotemporal modelling"
 # filters:
 date: today
 published-title: "Version"
-bibliography: "../manuscript/zotero_library.bib"
-csl: "../manuscript/ices_jms.csl"
+bibliography: "../../data/bibliography/zotero_library.bib"
+csl: "../../data/bibliography/ices_jms.csl"
 format:
-  # docx:
-  #   reference-doc: "../manuscript/custom-reference-doc.docx"
   html:
     self-contained: true
     fig-width: 9

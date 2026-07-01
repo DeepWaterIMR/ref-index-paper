@@ -18,8 +18,8 @@ format:
     code-fold: true
     output-file: SI-Text-3-model-selection
     toc: true
-bibliography: ../manuscript/zotero_library.bib
-csl: ../manuscript/ices_jms.csl
+bibliography: "../../data/bibliography/zotero_library.bib"
+csl: "../../data/bibliography/ices_jms.csl"
 execute:
   message: false
   warning: false

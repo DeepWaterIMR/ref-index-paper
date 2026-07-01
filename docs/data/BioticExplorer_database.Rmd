@@ -94,8 +94,8 @@ theme_set(theme_cust) # Set default theme globally for the entire project
 
 ## Custom functions
 
-source("R/legacy/make_table.R")
-source("R/legacy/bubble_map.R")
+source("R/make_table.R")
+source("R/bubble_map.R")
 
 ## Flatten list of ggplots
 ## https://stackoverflow.com/questions/55731855/how-to-extract-every-ggplot2-plot-from-a-nested-list
@@ -121,7 +121,7 @@ htmlcat <- function(text) {
 
 ## Connect to the database
 
-This stuff works only on Mikko's computers:
+This stuff works only on computers with local access to the BioticExplorerServer database:
 
 ```{r bes-database}
 if (update_data) {
@@ -129,7 +129,9 @@ if (update_data) {
 
   ## Connect to the database
 
-  con_db <- "~/IMR_biotic_BES_database/bioticexplorer.duckdb" %>%
+  bes_database_path <- Sys.getenv("BES_DATABASE_PATH", "paste your BES database path here")
+
+  con_db <- bes_database_path %>%
     normalizePath() %>%
     duckdb::duckdb(read_only = TRUE) %>%
     DBI::dbConnect()

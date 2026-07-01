@@ -4,6 +4,20 @@ Code repository for Vihtakari et al. (2026): Demersal distribution and fisheries
 
 The goal is not to reconstruct the published paper results exactly. The paper used internal and partly restricted data. This public workflow demonstrates the model structure on an updated, curated dataset with Russian data excluded by default.
 
+## Documentation
+
+The Quarto documents in `docs/SI files/` are the supplementary-information text of the paper and are the primary demonstration of how the survey index was calculated:
+
+- `SI-Text-1-data.qmd` — data
+- `SI-Text-2-sdmTMB.qmd` — spatiotemporal modelling
+- `SI-Text-3-model-selection.qmd` — model selection
+- `SI-Text-4-length-based-models.qmd` — length-based models for redfish
+- `SI-Text-5-bottom-temperature.qmd` — bottom temperature modelling
+
+They render against the public data in `data/public/` and the showcase model outputs, and share a bibliography and citation style file kept at `data/bibliography/`.
+
+`docs/data/` holds the original data-compilation notebooks used to extract and prepare source survey data from the IMR BioticExplorerServer database. They only run on computers with local access to that database and depend on `R/read_spd_1_6.R` and `R/run_first_bes.R`. They are kept for reference/reproducibility of the data-compilation steps described in the paper; they are not required to run the public showcase workflow below.
+
 ## Data
 
 The public analysis starts from sanitized station-level files in `data/public/`. A matching public dataset is intended to be available from NMDC: <https://doi.org/10.21335/NMDC-999805712>.
@@ -48,5 +62,3 @@ The workflow writes:
 - showcase model outputs under `output/`.
 
 `review/` and `output/` are local QA products and are ignored by Git unless explicitly reviewed for public release.
-
-Legacy manuscript and SI helpers live under `R/legacy/`. They support the local `docs/` workflows but are not part of the minimal public showcase path.

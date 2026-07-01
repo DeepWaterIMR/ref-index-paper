@@ -2,8 +2,8 @@
 title: "SI Text 1: Data"
 date: today
 published-title: "Version"
-bibliography: "../manuscript/zotero_library.bib"
-csl: "../manuscript/ices_jms.csl"
+bibliography: "../../data/bibliography/zotero_library.bib"
+csl: "../../data/bibliography/ices_jms.csl"
 format:
   html:
     self-contained: true

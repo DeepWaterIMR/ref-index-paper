@@ -3,8 +3,8 @@ title: "SI Text 5: Bottom temperature modelling"
 subtitle: ""
 date: today
 published-title: "Version"
-bibliography: "../manuscript/zotero_library.bib"
-csl: "../manuscript/ices_jms.csl"
+bibliography: "../../data/bibliography/zotero_library.bib"
+csl: "../../data/bibliography/ices_jms.csl"
 format:
   html:
     self-contained: true

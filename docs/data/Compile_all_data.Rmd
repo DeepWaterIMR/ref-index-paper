@@ -94,8 +94,8 @@ theme_set(theme_cust) # Set default theme globally for the entire project
 
 ## Custom functions
 
-source("R/legacy/make_table.R")
-source("R/legacy/bubble_map.R")
+source("R/make_table.R")
+source("R/bubble_map.R")
 
 ## Flatten list of ggplots
 ## https://stackoverflow.com/questions/55731855/how-to-extract-every-ggplot2-plot-from-a-nested-list

@@ -140,8 +140,6 @@ prepare_public_data <- function(
   if (write_outputs) {
     saveRDS(stn_public, project_path("data", "public", "redfish_station_data.rds"), compress = "xz")
     saveRDS(len_public, project_path("data", "public", "redfish_length_data.rds"), compress = "xz")
-    readr::write_csv(stn_public, project_path("data", "public", "redfish_station_data.csv"))
-    readr::write_csv(len_public, project_path("data", "public", "redfish_length_data.csv"))
     readr::write_csv(cruise_summary, project_path("data", "public", "redfish_cruise_summary.csv"))
     readr::write_csv(duplicate_station_report, project_path("review", "tables", "duplicate_station_report.csv"))
     readr::write_csv(duplicate_length_report, project_path("review", "tables", "duplicate_length_report.csv"))
